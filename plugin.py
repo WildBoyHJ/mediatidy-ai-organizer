@@ -137,11 +137,31 @@ class Plugin(BasePlugin):
                     value=ui.ref("query.progress.data.completed"),
                     total=ui.ref("query.progress.data.total"),
                 ),
+                ui.Table(
+                    source=ui.ref("query.progress.data.steps"),
+                    rowKey="label",
+                    pageSize=10,
+                    columns=[
+                        {"label": "步骤", "field": "label", "cells": []},
+                        {"label": "执行方", "field": "owner", "cells": []},
+                        {"label": "状态", "field": "state", "cells": []},
+                        {"label": "进度", "field": "detail", "cells": []},
+                    ],
+                ),
+                ui.Stack(
+                    ui.Button(label="刷新进度", variant="outline", onClick=[
+                        {"type": "query", "queryId": "progress"},
+                        {"type": "query", "queryId": "organize"},
+                        {"type": "query", "queryId": "tasks"},
+                        {"type": "query", "queryId": "results"},
+                    ]),
+                    direction="row", gap="sm",
+                ),
                 ui.Text(
                     text=ui.expr(
                         "if",
                         running,
-                        "识别阶段显示当前环节与正在处理的文件名；整理由 MT 执行，进度见下方「整理进度」。",
+                        "扫描与 MT 整理两行的进度是现查任务状态得到的，点「刷新进度」更新。",
                         ui.ref("query.results.data.message"),
                     ),
                     tone="muted",
@@ -325,6 +345,7 @@ class Plugin(BasePlugin):
             refs.append(task["ref"])
         self._patch_flow(ctx, flow_key, {"scanRefs": refs, "scanParent": ctx.run_id})
         self._save_pending(ctx, flow_key, files)
+        self._report(ctx, "扫描目录", 0, 0, "扫描完成后自动开始识别")
         ctx.mt.log(level="info", message=f"已提交 {len(refs)} 个扫描任务，等待完成后继续识别")
         ctx.mt.tasks.wait(refs=refs, completion={
             "action": "after-scan",
@@ -1246,56 +1267,236 @@ class Plugin(BasePlugin):
         entry = ctx.mt.storage.get(key="currentRun")
         return entry["value"] if entry["found"] else ""
 
+    # 阶段名 → 步骤序号（0 扫描 / 1 识别 / 2 核对 / 3 提交 / 4 整理 / 5 归档）
+    STEP_CURSOR = {
+        "准备识别": 1, "识别中": 1, "已识别": 1,
+        "核对 TMDB": 2,
+        "生成草稿": 3, "草稿已生成": 3, "提交整理": 3, "已提交整理": 3,
+    }
+
+    @staticmethod
+    def _step(label: str, owner: str, state: str, detail: str,
+              completed: int = 0, total: int = 0) -> dict:
+        return {"label": label, "owner": owner, "state": state, "detail": detail,
+                "completed": int(completed), "total": int(total)}
+
+    @staticmethod
+    def _step_state(index: int, cursor: int) -> str:
+        if index < cursor:
+            return "已完成"
+        if index == cursor:
+            return "进行中"
+        return "待开始"
+
+    def _task_aggregate(self, ctx: Context, refs: list[str]) -> dict:
+        """把一组任务 ref 汇总成计数 —— 用于 MT 执行的步骤。
+
+        completed/total 用任务自己的文件数（扫描任务 total=400 那种），
+        done/failed 是任务条数，两者对整理任务来说恰好相等。
+        """
+        wanted = {ref for ref in refs if ref}
+        info = {"done": 0, "failed": 0, "running": 0, "pending": 0,
+                "completed": 0, "total": 0, "active": False}
+        if not wanted:
+            return info
+        cursor, found = "", {}
+        for _ in range(20):
+            page = ctx.mt.tasks.list(cursor=cursor, limit=100)
+            for item in page.get("items", []):
+                ref = item.get("ref")
+                if ref in wanted and ref not in found:
+                    found[ref] = item
+            cursor = page.get("nextCursor") or ""
+            if not cursor or len(found) >= len(wanted):
+                break
+        for ref in wanted:
+            item = found.get(ref) or {}
+            state = item.get("status") or ""
+            total = int(item.get("total") or 1)
+            done = int(item.get("completed") or 0)
+            info["total"] += total
+            if state == "done":
+                info["done"] += 1
+                info["completed"] += done if done else total
+            elif state in ("failed", "cancelled", "interrupted", "outcome_unknown"):
+                info["failed"] += 1
+                info["completed"] += done
+            elif state == "running":
+                info["running"] += 1
+                info["active"] = True
+                info["completed"] += done
+            else:
+                info["pending"] += 1
+                info["active"] = True
+                info["completed"] += done
+        return info
+
+    def _build_steps(self, ctx: Context, flow: dict, summary: dict, status: str,
+                     stage: str, done_count: int, total_in_step: int,
+                     total_files: int) -> list[dict]:
+        counts = summary.get("counts") or {}
+        matched = int(counts.get("matched") or 0)
+        submitted = int(counts.get("submitted") or 0)
+        rows: list[dict] = []
+
+        # 0 目录扫描：选了文件就跳过；选了目录要读 MT 的扫描任务
+        scan_refs = [ref for ref in (flow.get("scanRefs") or []) if ref]
+        if not scan_refs:
+            rows.append(self._step("目录扫描", "MT", "跳过", "直接选了文件"))
+        else:
+            scan = self._task_aggregate(ctx, scan_refs)
+            if status == "scanning":
+                state = "进行中"
+                detail = f"已扫 {scan['completed']}/{scan['total'] or '?'} 个"
+            elif scan["failed"]:
+                state = "已完成"
+                detail = f"扫描 {scan['completed']} 个后停止（用已扫到的结果）"
+            else:
+                state = "已完成"
+                detail = f"找到 {max(scan['completed'], total_files)} 个视频"
+            rows.append(self._step("目录扫描", "MT", state, detail,
+                                   scan["completed"], scan["total"]))
+
+        # 1..3 插件自己的三段，用落盘的 stage 当游标
+        cursor = self.STEP_CURSOR.get(stage, -1)
+        if status in ("waiting", "submitting"):
+            cursor = 4
+        elif status == "done":
+            cursor = 6
+        elif status == "cancelled":
+            cursor = 4
+
+        if cursor > 1:
+            rows.append(self._step("AI 识别", "AI", "已完成",
+                                   f"{total_files}/{total_files} 个文件", total_files, total_files))
+        elif cursor == 1:
+            rows.append(self._step("AI 识别", "AI", "进行中",
+                                   f"{done_count}/{total_in_step or total_files} 个文件",
+                                   done_count, total_in_step or total_files))
+        else:
+            rows.append(self._step("AI 识别", "AI", "待开始", f"0/{total_files} 个文件",
+                                   0, total_files))
+
+        if cursor > 2:
+            rows.append(self._step("TMDB 核对", "插件", "已完成",
+                                   f"可整理 {matched}/{total_files}", matched, total_files))
+        elif cursor == 2:
+            rows.append(self._step("TMDB 核对", "插件", "进行中",
+                                   f"{done_count}/{total_in_step or total_files} 个文件",
+                                   done_count, total_in_step or total_files))
+        else:
+            rows.append(self._step("TMDB 核对", "插件", "待开始", f"0/{total_files}",
+                                   0, total_files))
+
+        if cursor > 3:
+            rows.append(self._step("提交整理", "插件", "已完成",
+                                   f"已提交 {submitted}/{matched}", submitted, matched))
+        elif cursor == 3:
+            rows.append(self._step("提交整理", "插件", "进行中",
+                                   f"{done_count}/{total_in_step or matched} 个",
+                                   done_count, total_in_step or matched))
+        else:
+            rows.append(self._step("提交整理", "插件", "待开始", f"0/{matched}", 0, matched))
+
+        # 4 整理执行：MT 跑任务，进度靠 tasks.list
+        task_refs = [ref for ref in (flow.get("taskRefs") or []) if ref]
+        if not task_refs:
+            rows.append(self._step("MT 整理", "MT", "待开始", "还没有提交任务"))
+        else:
+            org = self._task_aggregate(ctx, task_refs)
+            settled = org["done"] + org["failed"]
+            if status == "cancelled":
+                state = "已取消"
+                detail = f"完成 {org['done']}，其余已取消"
+            elif settled >= len(task_refs):
+                state = "已完成"
+                detail = f"完成 {org['done']}，失败 {org['failed']}"
+            else:
+                state = "进行中"
+                detail = (f"{settled}/{len(task_refs)}，进行中 {org['running']}，"
+                          f"排队 {org['pending']}")
+            rows.append(self._step("MT 整理", "MT", state, detail, settled, len(task_refs)))
+
+        # 5 归档：collect 续接把真实结果回写
+        if status == "done":
+            rows.append(self._step("归档结果", "插件", "已完成",
+                                   f"{submitted} 个已回写", submitted, submitted))
+        elif status == "cancelled":
+            rows.append(self._step("归档结果", "插件", "已取消", "本轮被取消"))
+        else:
+            rows.append(self._step("归档结果", "插件", "待开始", "等整理任务结束",
+                                   0, submitted or 0))
+        return rows
+
     @query("progress")
     def progress(self, input: dict, ctx: Context) -> dict:
         """刷新页面后 run.* 可能为空，这里用 storage 兜住最近一次进度。
 
-        进入整理阶段后识别已经结束，进度条不该再假装在动：直接给满格，
-        文案指向下方的整理进度。
+        返回六步总览（steps），其中扫描与 MT 整理的进度是现查 tasks.list 得到的，
+        所以「MT 在做什么」也看得见。
         """
+        empty_steps: list[dict] = []
         flow_key = self._current_flow(ctx)
         if not flow_key:
             return {"completed": 0, "total": 0, "message": "", "stage": "",
-                    "status": "", "active": False}
+                    "status": "", "active": False, "steps": empty_steps}
+        flow = self._load_flow(ctx, flow_key) or {}
         entry = ctx.mt.storage.get(key=f"runs/{flow_key}/progress")
         data = entry["value"] if entry["found"] else {}
         summary_entry = ctx.mt.storage.get(key=f"runs/{flow_key}/summary")
         summary = summary_entry["value"] if summary_entry["found"] else {}
         status = str(summary.get("status") or "")
         counts = summary.get("counts") or {}
-        identify_total = int(counts.get("total") or data.get("total") or 0)
+        total_files = int(counts.get("total") or data.get("total") or 0)
+        stage = str(data.get("stage") or "")
+        done_count = int(data.get("completed") or 0)
+        total_in_step = int(data.get("total") or 0)
+        identify_total = total_files or total_in_step
 
+        stale = status in ("running", "identifying", "scanning") \
+            and _age_minutes(str(data.get("at") or "")) > STALE_MINUTES
+        steps = self._build_steps(ctx, flow, summary, status, stage,
+                                  done_count, total_in_step, total_files)
+
+        if stale:
+            for row in steps:
+                if row["state"] == "进行中":
+                    row["state"] = "已中断"
+                    break
+            return {"completed": identify_total, "total": identify_total,
+                    "message": "上一轮已中断 · 可以直接重新开始",
+                    "stage": "stale", "status": "stale", "active": False,
+                    "steps": steps, "current": ""}
+
+        current = next((row for row in steps if row["state"] == "进行中"), None)
         if status in ("waiting", "submitting"):
             rows = self._task_rows(ctx, flow_key)
             if rows and not any(row["active"] for row in rows):
-                # 任务都结束了却没走到 collect（取消 / 中断）——
-                # 不能一直当「运行中」，否则开始按钮会被永久禁用
                 return {"completed": identify_total, "total": identify_total,
                         "message": "整理已结束 · 结果见下方识别结果",
-                        "stage": "done", "status": "done", "active": False}
+                        "stage": "done", "status": "done", "active": False,
+                        "steps": steps, "current": ""}
             return {"completed": identify_total, "total": identify_total,
                     "message": "识别完成 · 整理由 MT 执行，进度见下方「整理进度」",
-                    "stage": "organize", "status": status, "active": True}
+                    "stage": "organize", "status": status, "active": True,
+                    "steps": steps, "current": current["label"] if current else ""}
         if status in ("done", "cancelled"):
             message = ("整理任务已全部取消 · 结果见下方识别结果" if status == "cancelled"
                        else "本轮已结束 · 结果见下方识别结果")
             return {"completed": identify_total, "total": identify_total,
-                    "message": message, "stage": "done", "status": status, "active": False}
-        if status in ("running", "identifying", "scanning") \
-                and _age_minutes(str(data.get("at") or "")) > STALE_MINUTES:
-            # 上一轮异常中断（插件被重启 / 流程被杀），别把「运行中」永久挂着
-            return {"completed": int(data.get("completed") or 0),
-                    "total": int(data.get("total") or 0),
-                    "message": "上一轮已中断 · 可以直接重新开始",
-                    "stage": "stale", "status": "stale", "active": False}
-        return {
-            "completed": int(data.get("completed") or 0),
-            "total": int(data.get("total") or 0),
-            "message": str(data.get("message") or ""),
-            "stage": str(data.get("stage") or ""),
-            "status": status,
-            "active": status in ("running", "identifying", "scanning"),
-        }
+                    "message": message, "stage": "done", "status": status,
+                    "active": False, "steps": steps, "current": ""}
+
+        if current is None:
+            completed, total = identify_total, identify_total
+            message = "本轮已结束 · 结果见下方识别结果"
+        else:
+            completed = int(current.get("completed") or 0)
+            total = int(current.get("total") or 0)
+            message = f"{current['label']} · {current['detail']}"
+        return {"completed": completed, "total": total, "message": message,
+                "stage": stage, "status": status, "active": current is not None,
+                "steps": steps, "current": current["label"] if current else ""}
 
     @query("organize")
     def organize(self, input: dict, ctx: Context) -> dict:

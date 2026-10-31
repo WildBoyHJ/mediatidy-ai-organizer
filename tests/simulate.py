@@ -35,6 +35,7 @@ class FakeHost:
         self.task_status: dict[str, str] = {}
         self.cancelled: list[str] = []
         self.fail_cancel = False
+        self.extra_tasks: list[dict] = []
 
     def call(self, invocation, name, value):
         self.calls.append((name, value))
@@ -124,6 +125,7 @@ class FakeHost:
             items.append({"ref": ref, "runId": "t", "kind": "organize", "status": status,
                           "total": 1, "completed": 1 if status == "done" else 0,
                           "failed": 1 if status == "failed" else 0, "updatedAt": ""})
+        items.extend(self.extra_tasks)
         return {"items": items, "nextCursor": ""}
 
     def m_tasks_cancel(self, value):

@@ -101,6 +101,23 @@ AI 识别整理 · 直接整理｜成功 7，未处理 3
 
 > 为什么要落盘：宿主刷新页面时会重置 `input` / `state`，`run.*` 也可能变空。所以选择项走 `state` + storage 默认值，进度走 `coalesce(run.*, query.progress.*)` 双层兜底。
 
+## 六步总览
+
+「进度」卡片顶部是整体进度条，下面是一张**六步表**，每行告诉你这一步由谁执行、走到哪了：
+
+| 步骤 | 执行方 | 状态 | 进度 |
+|---|---|---|---|
+| 目录扫描 | MT | 进行中 | 已扫 320/400 个 |
+| AI 识别 | AI | 待开始 | 0/400 个文件 |
+| TMDB 核对 | 插件 | 待开始 | 0/400 |
+| 提交整理 | 插件 | 待开始 | 0/0 |
+| MT 整理 | MT | 待开始 | 还没有提交任务 |
+| 归档结果 | 插件 | 待开始 | 等整理任务结束 |
+
+**扫描与 MT 整理这两行的进度是现查任务状态得到的**（`tasks.list`），所以「MT 在做什么、还剩多少」也看得见。点「刷新进度」会同时刷新四张卡的数据。
+
+> 为什么只有一行在「进行中」：插件是串行推进的，同一时刻只会停在一个步骤上。选了文件而不是目录时，第一行会显示「跳过」。
+
 ## 整理进度
 
 提交整理任务后，插件这一轮就结束了，整理由 MT 自己执行。为了不让你只看到一句「已提交 385 个」，「整理进度」卡片会汇总每个任务的状态：
@@ -194,7 +211,7 @@ uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<�
 全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
 
 ```bash
-for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks test_refresh; do
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks test_refresh test_steps; do
   .venv/bin/python tests/$t.py
 done
 .venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查
@@ -214,6 +231,7 @@ done
 | `test_organize.py` | 任务映射落盘、整理状态汇总、当前整理项、失败计数、草稿模式无任务、页面声明 |
 | `test_tasks.py` | 列表只留待处理、取消后从列表消失、分页、单条取消、取消全部跳过已完成、越界 ref 拒绝、取消失败不抛错 |
 | `test_refresh.py` | 首屏默认值、刷新后选择项带回、进度只绑 storage、整理阶段满格、active 切换、落盘节流 |
+| `test_steps.py` | 六步状态机：扫描读 MT 任务、跳过分支、识别/核对位置、MT 整理计数、全部完成、取消 |
 | `doctor.py` | 清单静态检查、UI 组件属性白名单、invoke 必填字段、续接参数 |
 
 `doctor.py` 里两条检查是从真实故障里长出来的：
