@@ -24,12 +24,14 @@ class FakeHost:
         self.tmdb_search = tmdb_search
         self.tmdb_detail = tmdb_detail
         self.fail_ai = fail_ai
+        self.fail_progress = False
         self.calls: list[tuple[str, dict]] = []
         self.kv: dict[str, dict] = {}
         self.summary: dict = {}
         self.prepared: list[dict] = []
         self.queued: list[dict] = []
         self.waiting: list[str] = []
+        self.progress: list[dict] = []
 
     def call(self, invocation, name, value):
         self.calls.append((name, value))
@@ -45,6 +47,14 @@ class FakeHost:
                 "limits": {"maxWorkflowFiles": 500, "maxFileBatch": 100}}
 
     def m_runtime_progress(self, value):
+        if self.fail_progress:
+            from mt_plugin import SDKError
+            raise SDKError("进度上报失败", "PROGRESS_BOOM")
+        self.progress.append({
+            "completed": value.get("completed"),
+            "total": value.get("total"),
+            "message": value.get("message", ""),
+        })
         return True
 
     def m_runtime_checkpoint(self, value):

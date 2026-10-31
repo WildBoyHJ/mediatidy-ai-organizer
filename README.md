@@ -71,6 +71,26 @@ AI 识别整理 · 直接整理｜成功 7，未处理 3
 - 通知失败**绝不影响整理结果**——只写一条 warn 日志。
 - 需要在「设置与授权」里勾选 `notification.send` 能力，并授权至少一个通知通道。
 
+## 进度显示
+
+点「开始识别与整理」后，「进度」卡片会实时更新，进度条上直接写着当前阶段、已完成数量和正在处理的文件：
+
+```
+准备识别 0/24 · 共 24 个文件
+识别中 8/24 · 正在处理 Dune.Part.Two.2024.2160p.mkv 等 8 个
+已识别 16/24 · Severance.S02E08.1080p.mkv
+核对 TMDB 17/24 · Severance.S02E08.1080p.mkv
+生成草稿 0/18 · 正在处理 Oppenheimer.2023.1080p.mkv
+草稿已生成 18/18 · 少年的你.2019.mkv
+```
+
+几个约定：
+
+- **阶段固定为六段**：准备识别 → 识别 → 核对 TMDB → 生成草稿 / 提交整理 → 归档。看到当前阶段就知道卡在哪一步。
+- **识别按批推进**：宿主一次 AI 调用处理一批（默认 8 个文件），所以进度条按批前进，label 里会写明「等 N 个」，不会假装逐个文件在动。
+- **文件名超长会截断**加省略号，不会把进度条撑坏。
+- **进度上报失败不影响整理**：宿主进度条出错只记一条日志，主流程照常跑完。
+
 ## 结果状态
 
 | 状态 | 含义 |
@@ -123,7 +143,7 @@ uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<�
 全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
 
 ```bash
-for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify; do
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress; do
   .venv/bin/python tests/$t.py
 done
 .venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查
@@ -139,6 +159,7 @@ done
 | `test_ai_fallback.py` | 联网搜索未开启时降级、只降级一次、AI 全挂 |
 | `test_ai_output.py` | `mediaType=unknown` 反查、有 ID 无季集、目录标注 ID、唯一候选兜底 |
 | `test_notify.py` | 成功/失败通知、开关、通道回退、通知故障不影响整理 |
+| `test_progress.py` | 阶段顺序、文件名进 label、completed 单调不减、上报失败不影响主流程、页面绑定 |
 | `doctor.py` | 清单静态检查、UI 组件属性白名单、invoke 必填字段、续接参数 |
 
 `doctor.py` 里两条检查是从真实故障里长出来的：

@@ -95,12 +95,22 @@ class Plugin(BasePlugin):
                 title="开始",
             ),
             ui.Card(
-                ui.Text(text=ui.ref("query.results.data.message")),
                 ui.Progress(
+                    label=ui.ref("run.progress.message"),
                     value=ui.ref("run.progress.completed"),
                     total=ui.ref("run.progress.total"),
                 ),
-                title="进度",
+                ui.Text(
+                    text=ui.expr(
+                        "if",
+                        running,
+                        "运行中：进度条上显示当前阶段、已完成数量与正在处理的文件名。",
+                        ui.ref("query.results.data.message"),
+                    ),
+                    tone="muted",
+                    size="sm",
+                ),
+                title=ui.expr("if", running, "进度 · 运行中", "进度"),
             ),
             ui.Card(
                 ui.Table(
@@ -299,7 +309,8 @@ class Plugin(BasePlugin):
                        message=f"AI 不可用（{state['aiUnavailable']}），改用本地文件名解析")
 
         results: list[dict] = []
-        ctx.mt.runtime.progress(completed=0, total=len(files), message="开始识别")
+        total = len(files)
+        self._report(ctx, "准备识别", 0, total, f"共 {total} 个文件")
 
         for start in range(0, len(files), batch_size):
             if time.monotonic() > deadline:
@@ -309,6 +320,9 @@ class Plugin(BasePlugin):
                 break
             ctx.mt.runtime.checkpoint()
             chunk = files[start:start + batch_size]
+            head = chunk[0].get("name", "") if chunk else ""
+            tail = f" 等 {len(chunk)} 个" if len(chunk) > 1 else ""
+            self._report(ctx, "识别中", len(results), total, f"正在处理 {head}{tail}")
             if ai_ok and int(state["aiCalls"]) < AI_CHAT_LIMIT:
                 records, state = self._identify_batch(ctx, chunk, options, state)
             else:
@@ -316,11 +330,9 @@ class Plugin(BasePlugin):
             results.extend(records)
             # 把本批已确定的同剧身份喂给下一批，避免后续批次换到另一个 TMDB 条目
             state["seriesHint"] = identify.series_hint(results)
-            ctx.mt.runtime.progress(
-                completed=min(start + batch_size, len(files)),
-                total=len(files),
-                message=f"已识别 {min(start + batch_size, len(files))}/{len(files)}",
-            )
+            done = min(start + len(chunk), total)
+            self._report(ctx, "已识别", done, total,
+                         chunk[-1].get("name", "") if chunk else "")
             self._persist(ctx, flow_key, results)
             ctx.mt.runtime.result(value={"counts": self._counts(results), "message": "识别中"})
 
@@ -521,7 +533,8 @@ class Plugin(BasePlugin):
         seasons_cache: dict[int, list[int]] = {}
         tolerance = options["tolerance"]
 
-        for record in results:
+        total = len(results)
+        for index, record in enumerate(results):
             if record["status"] != "identified":
                 continue
             if time.monotonic() > deadline:
@@ -529,6 +542,7 @@ class Plugin(BasePlugin):
                 record["reason"] = "超出识别时间上限，未核对 TMDB"
                 continue
             ctx.mt.runtime.checkpoint()
+            self._report(ctx, "核对 TMDB", index + 1, total, record.get("name", ""))
 
             media_type = record.get("mediaType")
             tmdb_id = int(record.get("tmdbId") or 0)
@@ -818,8 +832,11 @@ class Plugin(BasePlugin):
 
     def _submit_drafts(self, ctx: Context, flow_key: str, ready: list[dict], profile_id: int) -> int:
         created = 0
+        total = len(ready)
         for start in range(0, len(ready), 100):
             chunk = ready[start:start + 100]
+            self._report(ctx, "生成草稿", start, total,
+                         f"正在处理 {chunk[0].get('name', '') if chunk else ''}")
             items = []
             for record in chunk:
                 item = {
@@ -861,13 +878,17 @@ class Plugin(BasePlugin):
                 else:
                     record["status"] = "failed"
                     record["reason"] = "草稿未生成，请检查文件版本与方案"
+            self._report(ctx, "草稿已生成", min(start + len(chunk), total), total,
+                         chunk[-1].get("name", "") if chunk else "")
         self._persist(ctx, flow_key, ready)
         return created
 
     def _submit_direct(self, ctx: Context, flow_key: str, ready: list[dict], profile_id: int) -> list[str]:
         refs: list[str] = []
-        for record in ready:
+        total = len(ready)
+        for index, record in enumerate(ready):
             ctx.mt.runtime.checkpoint()
+            self._report(ctx, "提交整理", index, total, record.get("name", ""))
             key = f"{ctx.flow_id}:{record['ref']}:{record['tmdbId']}"
             payload = {
                 "fileRef": record["ref"],
@@ -1193,6 +1214,27 @@ class Plugin(BasePlugin):
             elif status == "failed":
                 counts["failed"] += 1
         return counts
+
+    # ---------------------------------------------------------------- 进度
+
+    @staticmethod
+    def _report(ctx: Context, stage: str, done: int, total: int, detail: str = "") -> None:
+        """把阶段、进度和当前文件名推给宿主进度条。
+
+        宿主只给 completed / total / message 三个字段，页面拿
+        run.progress.message 当进度条 label，所以阶段与文件名都拼进 message。
+        进度上报失败绝不能影响主流程。
+        """
+        text = f"{stage} {int(done)}/{int(total)}"
+        clean = (detail or "").strip()
+        if clean:
+            if len(clean) > 56:
+                clean = clean[:54] + "…"
+            text = f"{text} · {clean}"
+        try:
+            ctx.mt.runtime.progress(completed=int(done), total=int(total), message=text)
+        except SDKError:
+            pass
 
     @staticmethod
     def _write_summary(ctx: Context, flow_key: str, summary: dict) -> None:
