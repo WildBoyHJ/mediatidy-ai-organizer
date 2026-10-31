@@ -21,3 +21,6 @@ venv/
 # 本地测试数据
 /tmp/
 *.log
+
+# 发布包单独保留
+!releases/*.zip
