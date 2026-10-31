@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import calendar
 import time
 from typing import Any
 
@@ -36,6 +37,16 @@ CANCELLED_STATE = "cancelled"
 # tasks.cancel 单次调用上限
 CANCEL_LIMIT = 500
 TASK_PAGE_SIZE = 20
+# 识别阶段超过这么久没有新进度，就认为上一轮已经中断（否则按钮会被永久禁用）
+STALE_MINUTES = 15
+
+
+def _age_minutes(stamp: str) -> float:
+    try:
+        then = time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return 0.0
+    return (time.time() - calendar.timegm(then)) / 60.0
 
 
 def _now() -> str:
@@ -110,9 +121,13 @@ class Plugin(BasePlugin):
                 ),
                 ui.Text(text=ui.expr(
                     "if",
-                    ui.expr("eq", ui.ref("stats.selections"), 0),
-                    "请先选择文件或目录",
-                    ui.expr("if", ui.ref("state.profileId"), "准备就绪，可以开始", "请选择整理方案"),
+                    running,
+                    "上一轮还在进行中，完成或取消后才能开始新的一轮",
+                    ui.expr("if",
+                            ui.expr("eq", ui.ref("stats.selections"), 0),
+                            "请先选择文件或目录",
+                            ui.expr("if", ui.ref("state.profileId"),
+                                    "准备就绪，可以开始", "请选择整理方案")),
                 ), tone="muted", size="sm"),
                 title="开始",
             ),
@@ -1166,6 +1181,7 @@ class Plugin(BasePlugin):
             ctx.mt.log(level="error", message=f"取消任务失败：{error.code} {error}")
             raise
         ctx.mt.log(level="info", message=f"{'已取消' if ok else '未能取消'}整理任务 {ref}")
+        self._maybe_close_flow(ctx)
         return {"ref": ref, "cancelled": bool(ok)}
 
     @action("cancel-all")
@@ -1184,8 +1200,25 @@ class Plugin(BasePlugin):
                 ctx.mt.log(level="warn", message=f"取消 {row['label'] or row['ref']} 失败：{error.code}")
         ctx.mt.log(level="info",
                    message=f"取消全部：尝试 {len(targets)}，成功 {cancelled}，失败 {failed}")
+        self._maybe_close_flow(ctx)
         return {"total": len(rows), "attempted": len(targets),
                 "cancelled": cancelled, "failed": failed}
+
+    def _maybe_close_flow(self, ctx: Context) -> None:
+        """取消后若已无待处理任务，就把流程标记结束。
+
+        否则 summary.status 会一直停在 waiting，页面判定「运行中」，
+        开始按钮被永久禁用 —— 用户就再也点不动了。
+        """
+        flow_key = self._current_flow(ctx)
+        if not flow_key:
+            return
+        rows = self._task_rows(ctx, flow_key)
+        if rows and any(row["active"] for row in rows):
+            return
+        self._patch_summary(ctx, flow_key,
+                            {"status": "cancelled", "message": "整理任务已全部取消"})
+        ctx.mt.log(level="info", message="整理任务已清空，本轮标记为结束")
 
     def _task_rows(self, ctx: Context, flow_key: str) -> list[dict]:
         if not flow_key:
@@ -1233,20 +1266,35 @@ class Plugin(BasePlugin):
         identify_total = int(counts.get("total") or data.get("total") or 0)
 
         if status in ("waiting", "submitting"):
+            rows = self._task_rows(ctx, flow_key)
+            if rows and not any(row["active"] for row in rows):
+                # 任务都结束了却没走到 collect（取消 / 中断）——
+                # 不能一直当「运行中」，否则开始按钮会被永久禁用
+                return {"completed": identify_total, "total": identify_total,
+                        "message": "整理已结束 · 结果见下方识别结果",
+                        "stage": "done", "status": "done", "active": False}
             return {"completed": identify_total, "total": identify_total,
                     "message": "识别完成 · 整理由 MT 执行，进度见下方「整理进度」",
                     "stage": "organize", "status": status, "active": True}
-        if status == "done":
+        if status in ("done", "cancelled"):
+            message = ("整理任务已全部取消 · 结果见下方识别结果" if status == "cancelled"
+                       else "本轮已结束 · 结果见下方识别结果")
             return {"completed": identify_total, "total": identify_total,
-                    "message": "本轮已结束 · 结果见下方识别结果",
-                    "stage": "done", "status": status, "active": False}
+                    "message": message, "stage": "done", "status": status, "active": False}
+        if status in ("running", "identifying", "scanning") \
+                and _age_minutes(str(data.get("at") or "")) > STALE_MINUTES:
+            # 上一轮异常中断（插件被重启 / 流程被杀），别把「运行中」永久挂着
+            return {"completed": int(data.get("completed") or 0),
+                    "total": int(data.get("total") or 0),
+                    "message": "上一轮已中断 · 可以直接重新开始",
+                    "stage": "stale", "status": "stale", "active": False}
         return {
             "completed": int(data.get("completed") or 0),
             "total": int(data.get("total") or 0),
             "message": str(data.get("message") or ""),
             "stage": str(data.get("stage") or ""),
             "status": status,
-            "active": status == "running",
+            "active": status in ("running", "identifying", "scanning"),
         }
 
     @query("organize")
@@ -1455,6 +1503,12 @@ class Plugin(BasePlugin):
         try:
             profiles = ctx.mt.organize.profiles()
         except SDKError as error:
+            if error.code == "NO_DESTINATION":
+                # 宿主自己拒绝：方案的目标目录没有写入授权。给可执行的提示，别让它变成「点了没反应」。
+                message = ("所选整理方案的目标目录没有写入授权。请在 MT 的方案设置里"
+                           "给目标目录补上写权限，或换一个目标可写的方案后重试")
+                ctx.mt.log(level="error", message=f"{message}（{error.code}）")
+                raise SDKError(message, "NO_DESTINATION") from error
             message = f"无法读取整理方案（{error.code}），请检查 organize.read 授权"
             ctx.mt.log(level="error", message=message)
             raise SDKError(message, "NO_PROFILE") from error

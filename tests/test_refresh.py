@@ -128,10 +128,55 @@ def test_progress_throttled():
     print("  进度落盘次数:", len(writes), "（3 个文件的一轮）")
 
 
+def test_waiting_with_settled_tasks_is_not_active():
+    """任务都结束了但没走到 collect（被取消/中断）时不能一直算「运行中」，否则按钮永久禁用。"""
+    host, plugin, handlers = fresh()
+    ctx = ctx_for(host, FILES, DIRECT)
+    handlers[("action", "start")]({"profileId": 7, "mode": "direct"}, ctx)
+    host.kv["runs/flow-1/summary"]["value"]["status"] = "waiting"
+    host.task_status.update({"task-1": "cancelled", "task-2": "cancelled", "task-3": "cancelled"})
+    data = ask(handlers, "progress", ctx)
+    assert data["active"] is False, data
+    assert data["status"] == "done", data
+    print("  任务全结束 → 不再算运行中:", data["message"])
+
+
+def test_stale_running_is_not_active():
+    """识别阶段长时间没有新进度（插件被重启/流程被杀）也要放开按钮。"""
+    host, plugin, handlers = fresh()
+    ctx = ctx_for(host, FILES, DIRECT)
+    handlers[("action", "start")]({"profileId": 7, "mode": "direct"}, ctx)
+    host.kv["runs/flow-1/summary"]["value"]["status"] = "running"
+    host.kv["runs/flow-1/progress"]["value"]["at"] = "2020-01-01T00:00:00Z"
+    data = ask(handlers, "progress", ctx)
+    assert data["active"] is False, data
+    assert "中断" in data["message"], data["message"]
+    print("  上一次中断:", data["message"])
+
+
+def test_cancel_all_closes_flow():
+    """取消全部后 summary 要收尾，否则 summary.status 会一直停在 waiting。"""
+    host, plugin, handlers = fresh()
+    ctx = ctx_for(host, FILES, DIRECT)
+    handlers[("action", "start")]({"profileId": 7, "mode": "direct"}, ctx)
+    host.task_status.update({"task-1": "queued", "task-2": "queued", "task-3": "queued"})
+    token = current.set(ctx)
+    try:
+        handlers[("action", "cancel-all")]({}, ctx)
+    finally:
+        current.reset(token)
+    summary = host.kv["runs/flow-1/summary"]["value"]
+    assert summary["status"] == "cancelled", summary
+    data = ask(handlers, "progress", ctx)
+    assert data["active"] is False, data
+    print("  取消全部后收尾:", summary["message"], "| active", data["active"])
+
+
 if __name__ == "__main__":
     for function in (test_defaults_before_any_run, test_selection_survives_refresh,
                      test_progress_survives_refresh, test_progress_marks_active_while_running,
                      test_page_binds_progress_to_query, test_progress_full_bar_when_organizing,
-                     test_progress_throttled):
+                     test_progress_throttled, test_waiting_with_settled_tasks_is_not_active,
+                     test_stale_running_is_not_active, test_cancel_all_closes_flow):
         function()
     print("\n刷新不丢状态用例全部通过")
