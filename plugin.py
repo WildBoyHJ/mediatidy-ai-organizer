@@ -30,7 +30,7 @@ AI_CHAT_LIMIT = 78
 SAFE_FILES = 400
 TMDB_SEARCH_LIMIT = 500
 # 任务状态的归类：终态失败 / 仍可取消
-# 任务状态归类：仍可取消 / 终态失败 / 已取消
+# 任务状态的归类：仍可取消 / 终态失败 / 已取消
 CANCELABLE = ("submitting", "queued", "running", "waiting")
 FAILED_STATES = ("failed", "interrupted", "outcome_unknown")
 CANCELLED_STATE = "cancelled"
@@ -38,6 +38,9 @@ CANCELLED_STATE = "cancelled"
 CANCEL_LIMIT = 500
 TASK_PAGE_SIZE = 20
 # 识别阶段超过这么久没有新进度，就认为上一轮已经中断（否则按钮会被永久禁用）
+# 识别结果的状态筛选取值（顺序即页面下拉顺序）
+RESULTS_FILTERS = ("all", "identified", "matched", "submitted", "organized",
+                   "unrecognized", "identity_conflict", "needs_review", "failed")
 STALE_MINUTES = 15
 
 
@@ -151,7 +154,6 @@ class Plugin(BasePlugin):
                 ui.Stack(
                     ui.Button(label="刷新进度", variant="outline", onClick=[
                         {"type": "query", "queryId": "progress"},
-                        {"type": "query", "queryId": "organize"},
                         {"type": "query", "queryId": "tasks"},
                         {"type": "query", "queryId": "results"},
                     ]),
@@ -167,45 +169,15 @@ class Plugin(BasePlugin):
                     tone="muted",
                     size="sm",
                 ),
-                title=ui.expr("if", running, "进度 · 进行中", "进度"),
-            ),
-            ui.Card(
-                ui.Progress(
-                    label=ui.ref("query.organize.data.message"),
-                    value=ui.ref("query.organize.data.done"),
-                    total=ui.ref("query.organize.data.total"),
-                ),
-                ui.Text(text=ui.ref("query.organize.data.current"), tone="primary", size="sm"),
-                ui.Text(text=ui.ref("query.organize.data.hint"), tone="muted", size="sm"),
-                ui.Table(
-                    source=ui.ref("query.organize.data.items"),
-                    rowKey="ref",
-                    pageSize=10,
-                    columns=[
-                        {"label": "作品", "field": "label", "cells": []},
-                        {"label": "状态", "field": "statusLabel", "cells": []},
-                    ],
-                ),
-                ui.Text(
-                    text="整理由 MT 执行，这里读任务状态汇总；刷新后更新（整轮结束后宿主会自动刷新）。",
-                    tone="muted",
-                    size="sm",
-                ),
-                ui.Button(
-                    label="刷新整理进度",
-                    variant="outline",
-                    onClick=[{"type": "query", "queryId": "organize"},
-                             {"type": "query", "queryId": "results"}],
-                ),
-                title="整理进度",
-                visible=ui.expr(
-                    "gt",
-                    ui.expr("coalesce", ui.ref("query.organize.data.total"), 0),
-                    0,
-                ),
+                title="流程",
             ),
             ui.Card(
                 ui.Text(text=ui.ref("query.tasks.data.message"), size="sm"),
+                ui.Text(
+                    text=ui.ref("query.tasks.data.current"),
+                    tone="primary",
+                    size="sm",
+                ),
                 ui.Table(
                     source=ui.ref("query.tasks.data.items"),
                     rowKey="ref",
@@ -219,7 +191,7 @@ class Plugin(BasePlugin):
                             onClick=[{"type": "invoke", "actionId": "cancel-task",
                                       "input": {"ref": ui.ref("row.ref")}},
                                      {"type": "query", "queryId": "tasks"},
-                                     {"type": "query", "queryId": "organize"}],
+                                     {"type": "query", "queryId": "results"}],
                         )]},
                     ],
                 ),
@@ -227,7 +199,6 @@ class Plugin(BasePlugin):
                     ui.Button(label="刷新任务列表", variant="outline", onClick=[
                         {"type": "set", "path": "state.tasksCursor", "value": ""},
                         {"type": "query", "queryId": "tasks"},
-                        {"type": "query", "queryId": "organize"},
                     ]),
                     ui.Button(
                         label="下一页",
@@ -246,18 +217,37 @@ class Plugin(BasePlugin):
                     tone="warning",
                     size="sm",
                 ),
-                title="任务列表（待处理）",
-                visible=ui.expr(
-                    "gt",
-                    ui.expr("coalesce", ui.ref("query.tasks.data.total"), 0),
-                    0,
+                title=ui.expr(
+                    "if",
+                    ui.expr("gt", ui.expr("coalesce", ui.ref("query.tasks.data.total"), 0), 0),
+                    "整理任务 · 待处理",
+                    "整理任务",
                 ),
             ),
             ui.Card(
+                ui.Stack(
+                    ui.Select(label="按状态筛选", bind="state.resultFilter", options=[
+                        {"label": "全部", "value": "all"},
+                        {"label": "已识别（待核对）", "value": "identified"},
+                        {"label": "已核对（可整理）", "value": "matched"},
+                        {"label": "已提交", "value": "submitted"},
+                        {"label": "已完成", "value": "organized"},
+                        {"label": "未识别", "value": "unrecognized"},
+                        {"label": "身份冲突", "value": "identity_conflict"},
+                        {"label": "需人工处理", "value": "needs_review"},
+                        {"label": "失败", "value": "failed"},
+                    ]),
+                    ui.Button(label="应用筛选", variant="outline", onClick=[
+                        {"type": "set", "path": "state.cursor", "value": ""},
+                        {"type": "query", "queryId": "results"},
+                    ]),
+                    direction="row", gap="sm",
+                ),
                 ui.Table(
                     source=ui.ref("query.results.data.items"),
                     rowKey="id",
                     pageSize=20,
+                    searchable=True,
                     columns=[
                         {"label": "文件", "field": "name", "cells": []},
                         {"label": "识别作品", "field": "title", "cells": []},
@@ -285,9 +275,10 @@ class Plugin(BasePlugin):
             ),
             ui.Card(ui.RunHistory(), title="运行记录"),
             state={"cursor": "", "mode": last_mode, "profileId": last_profile,
-                   "tasksCursor": ""},
-            queries=[{"id": "results", "name": "results", "input": {"cursor": ui.ref("state.cursor")}},
-                     {"id": "organize", "name": "organize", "input": {}},
+                   "tasksCursor": "", "resultFilter": "all"},
+            queries=[{"id": "results", "name": "results",
+                      "input": {"cursor": ui.ref("state.cursor"),
+                                "status": ui.ref("state.resultFilter")}},
                      {"id": "tasks", "name": "tasks",
                       "input": {"cursor": ui.ref("state.tasksCursor")}},
                      {"id": "progress", "name": "progress", "input": {}}],
@@ -1123,35 +1114,80 @@ class Plugin(BasePlugin):
     def results(self, input: dict, ctx: Context) -> dict:
         current = ctx.mt.storage.get(key="currentRun")
         if not current["found"]:
-            return {"items": [], "nextCursor": "", "message": "尚未开始识别"}
+            return {"items": [], "nextCursor": "", "message": "尚未开始识别",
+                    "status": "", "filter": "all", "filtered": 0}
         flow_key = current["value"]
         summary_entry = ctx.mt.storage.get(key=f"runs/{flow_key}/summary")
         summary = summary_entry["value"] if summary_entry["found"] else {}
+        status_filter = str(input.get("status") or "all")
+        if status_filter not in RESULTS_FILTERS:
+            status_filter = "all"
+
         prefix = f"runs/{flow_key}/items/"
-        cursor = input.get("cursor", "")
-        if cursor and not cursor.startswith(prefix):
-            cursor = ""
-        page = ctx.mt.storage.list(prefix=prefix, cursor=cursor, limit=20, values=True)
-        items = []
-        for entry in page.get("items", []):
-            record = entry.get("value") or {}
-            items.append({
-                "id": entry["key"],
-                "name": record.get("name", ""),
-                "title": record.get("title", ""),
-                "tmdb": str(record.get("tmdbId") or ""),
-                "episodeLabel": self._episode_label(record),
-                "statusLabel": self._status_label(record.get("status", "")),
-                "reason": record.get("reason", ""),
-                "aiRaw": (record.get("preview") or {}).get("text", "")[:600],
-            })
+        # 选「全部」才用游标分页；按状态筛选时在服务端过滤，
+        # 每页 20 条按命中结果算，游标记住「已处理到第几个原始条目」。
+        offset = 0
+        if status_filter != "all":
+            cursor = str(input.get("cursor") or "")
+            offset = int(cursor) if cursor.isdigit() else 0
+        else:
+            cursor = input.get("cursor", "")
+            if cursor and not cursor.startswith(prefix):
+                cursor = ""
+
+        items: list[dict] = []
+        scanned = 0
+        next_cursor = ""
+        while True:
+            page = ctx.mt.storage.list(
+                prefix=prefix,
+                cursor="" if status_filter != "all" else cursor,
+                limit=200 if status_filter != "all" else 20,
+                values=True)
+            batch = page.get("items", [])
+            following = page.get("nextCursor") or ""
+            for entry in batch:
+                record = entry.get("value") or {}
+                if status_filter != "all":
+                    scanned += 1
+                    if scanned <= offset:
+                        continue
+                    if record.get("status") != status_filter:
+                        continue
+                items.append({
+                    "id": entry["key"],
+                    "name": record.get("name", ""),
+                    "title": record.get("title", ""),
+                    "tmdb": str(record.get("tmdbId") or ""),
+                    "episodeLabel": self._episode_label(record),
+                    "statusLabel": self._status_label(record.get("status", "")),
+                    "reason": record.get("reason", ""),
+                    "aiRaw": (record.get("preview") or {}).get("text", "")[:600],
+                })
+                if status_filter != "all" and len(items) >= 20:
+                    break
+            if status_filter == "all":
+                next_cursor = following
+                break
+            filled = len(items) >= 20
+            if filled or not following:
+                # 游标 = 服务端已消费的原始条目数；只要还有没读完的条目就允许继续翻
+                exhausted = not following and not filled
+                next_cursor = "" if exhausted else str(scanned)
+                break
+            cursor = following
+
         counts = summary.get("counts") or {}
         message = summary.get("message") or "尚未开始识别"
         if counts:
             message = f"{message}（共 {counts.get('total', 0)}，可整理 {counts.get('matched', 0)}，" \
                       f"已提交 {counts.get('submitted', 0)}，失败 {counts.get('failed', 0)}）"
-        return {"items": items, "nextCursor": page.get("nextCursor", ""), "message": message,
-                "status": summary.get("status", "")}
+        if status_filter != "all":
+            label = self._status_label(status_filter)
+            message = f"{message} · 正在只看「{label}」"
+        return {"items": items, "nextCursor": next_cursor, "message": message,
+                "status": summary.get("status", ""), "filter": status_filter,
+                "filtered": len(items)}
 
     @query("tasks")
     def tasks(self, input: dict, ctx: Context) -> dict:
@@ -1163,15 +1199,17 @@ class Plugin(BasePlugin):
         rows = self._task_rows(ctx, self._current_flow(ctx))
         if not rows:
             return {"items": [], "nextCursor": "", "total": 0, "cancellable": 0,
-                    "message": "本轮没有整理任务"}
+                    "message": "本轮没有整理任务", "current": ""}
         pending = [row for row in rows if row["active"]]
         done = sum(1 for row in rows if row["status"] == "done")
         cancelled = sum(1 for row in rows if row["status"] == CANCELLED_STATE)
         failed = sum(1 for row in rows if row["status"] in FAILED_STATES)
+        running = [row for row in rows if row["status"] == "running"]
+        current = f"正在整理 · {running[0]['label']}" if running else ""
         if not pending:
-            # 全部结束：列表清空，卡片随之隐藏，汇总信息仍可通过整理进度查看
             return {"items": [], "nextCursor": "", "total": 0, "cancellable": 0,
                     "done": done, "cancelled": cancelled, "failed": failed,
+                    "current": "",
                     "message": f"没有待处理的整理任务（已完成 {done}，已取消 {cancelled}，失败 {failed}）"}
         page = pending[offset:offset + TASK_PAGE_SIZE]
         following = offset + TASK_PAGE_SIZE
@@ -1184,6 +1222,7 @@ class Plugin(BasePlugin):
             "done": done,
             "cancelled": cancelled,
             "failed": failed,
+            "current": current,
             "message": f"当前 {len(pending)} 个待处理（已完成 {done}，已取消 {cancelled}，失败 {failed}）",
         }
 
@@ -1497,66 +1536,6 @@ class Plugin(BasePlugin):
         return {"completed": completed, "total": total, "message": message,
                 "stage": stage, "status": status, "active": current is not None,
                 "steps": steps, "current": current["label"] if current else ""}
-
-    @query("organize")
-    def organize(self, input: dict, ctx: Context) -> dict:
-        """整理阶段的实时进度。
-
-        整理由宿主执行，等待期间插件不在线（tasks.wait 后调用 SDK 会 FLOW_WAITING），
-        所以这里读 tasks.list 的任务状态自行汇总；页面靠刷新按钮更新
-        —— 宿主只在整轮运行结束后才自动刷新查询。
-        """
-        empty = {"total": 0, "done": 0, "failed": 0, "cancelled": 0, "remaining": 0,
-                 "running": 0, "pending": 0, "message": "尚未提交整理任务", "current": "",
-                 "hint": "", "items": []}
-        if not self._current_flow(ctx):
-            return empty
-        rows = self._task_rows(ctx, self._current_flow(ctx))
-        if not rows:
-            return {**empty, "message": "本轮没有整理任务（草稿模式，或没有可整理的文件）"}
-
-        done = failed = cancelled = running = pending = 0
-        current_label = ""
-        active: list[dict] = []
-        for row in rows:
-            status = row["status"]
-            if status == "done":
-                done += 1
-            elif status == CANCELLED_STATE:
-                # 已取消的不再列入明细，只在汇总里计数
-                cancelled += 1
-            elif status in FAILED_STATES:
-                failed += 1
-            elif status == "running":
-                running += 1
-                active.append({"ref": row["ref"], "label": row["label"],
-                               "statusLabel": row["statusLabel"]})
-                if not current_label:
-                    current_label = row["label"]
-            else:
-                pending += 1
-                active.append({"ref": row["ref"], "label": row["label"],
-                               "statusLabel": row["statusLabel"]})
-
-        total = len(rows)
-        remaining = total - done - failed - cancelled
-        if not current_label and active:
-            current_label = active[0]["label"]
-        # 进度条自己会显示 done/total，message 只描述状态，避免「完成 0/7 · 0/7」式重复
-        if remaining > 0:
-            message = f"整理中 · 正在整理 {current_label}" if current_label else "整理中 · 等待执行"
-        elif done == total:
-            message = "全部整理完成"
-        elif cancelled == total:
-            message = f"整理任务已全部取消（{cancelled} 个）"
-        else:
-            message = f"整理已结束：完成 {done}，{failed + cancelled} 个失败或已取消"
-        hint = (f"已完成 {done} · 失败 {failed} · 已取消 {cancelled} · 剩余 {remaining}"
-                f"（进行中 {running} / 排队 {pending}）")
-        return {"total": total, "done": done, "failed": failed, "cancelled": cancelled,
-                "remaining": remaining, "running": running, "pending": pending,
-                "message": message, "current": current_label, "hint": hint,
-                "items": active[:10]}
 
     @staticmethod
     def _task_status_label(status: str) -> str:

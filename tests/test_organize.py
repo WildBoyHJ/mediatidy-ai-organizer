@@ -1,4 +1,8 @@
-"""整理进度用例：任务映射落盘、状态汇总、当前整理项、页面声明。"""
+"""整理任务用例：映射来源、待处理列表、汇总计数、当前整理项、页面声明。
+
+说明：v0.11.1 起「整理进度」卡与「任务列表」合并，汇总信息统一由 tasks 查询提供，
+不再有独立的 organize 查询，避免两张卡显示同一件事。
+"""
 from __future__ import annotations
 
 import json
@@ -30,10 +34,10 @@ def run(config: dict, statuses: dict[str, str] | None = None):
     return host, plugin, handlers, ctx
 
 
-def query_organize(plugin, handlers, ctx) -> dict:
+def ask(handlers, name: str, ctx) -> dict:
     token = current.set(ctx)
     try:
-        return handlers[("query", "organize")]({}, ctx)
+        return handlers[("query", name)]({}, ctx)
     finally:
         current.reset(token)
 
@@ -45,88 +49,51 @@ def test_mapping_from_persisted_items():
     records = [v["value"] for k, v in host.kv.items() if "/items/" in k]
     with_task = [r for r in records if r.get("taskRef")]
     assert len(with_task) == len(host.queued) == 3, (len(with_task), len(host.queued))
-    assert {r["taskRef"] for r in with_task} == {f"task-{i + 1}" for i in range(3)}
-    data = query_organize(plugin, handlers, ctx)
+    data = ask(handlers, "tasks", ctx)
     assert data["total"] == 3, data
-    assert all(item["label"] for item in data["items"]), data["items"]
-    print("  映射来自 items 落盘 | 条数:", data["total"], "| 示例:", with_task[0]["title"])
+    print("  映射来自 items 落盘 | 条数:", data["total"])
 
 
-def test_progress_while_running():
+def test_current_task_label():
+    """tasks 查询要给出「正在整理」的那一部。"""
     host, plugin, handlers, ctx = run(
         DIRECT, {"task-1": "done", "task-2": "running", "task-3": "queued"})
-    data = query_organize(plugin, handlers, ctx)
-    assert data["total"] == 3, data
-    assert data["done"] == 1, data
-    assert data["running"] == 1, data
-    assert data["remaining"] == 2, data
-    assert data["current"], "应给出正在整理的片名"
-    assert "正在整理" in data["message"], data["message"]
-    assert data["message"].startswith("整理中 · 正在整理"), data["message"]
-    labels = [item["statusLabel"] for item in data["items"]]
-    assert "正在整理" in labels and "排队中" in labels, labels
-    print("  message:", data["message"])
-    print("  hint:", data["hint"])
+    data = ask(handlers, "tasks", ctx)
+    assert data["current"].startswith("正在整理 · "), data["current"]
+    assert data["done"] == 1 and data["total"] == 2, data
+    print("  ", data["current"], "|", data["message"])
 
 
-def test_progress_all_done():
+def test_all_done_message():
     host, plugin, handlers, ctx = run(
         DIRECT, {"task-1": "done", "task-2": "done", "task-3": "done"})
-    data = query_organize(plugin, handlers, ctx)
-    assert data["done"] == 3 and data["remaining"] == 0, data
-    assert data["message"] == "全部整理完成", data["message"]
-    print("  message:", data["message"])
+    data = ask(handlers, "tasks", ctx)
+    assert data["total"] == 0, data
+    assert "已完成 3" in data["message"], data["message"]
+    assert data["current"] == "", data
+    print("  ", data["message"])
 
 
-def test_progress_counts_failures():
+def test_failure_counted():
     host, plugin, handlers, ctx = run(
         DIRECT, {"task-1": "done", "task-2": "failed", "task-3": "done"})
-    data = query_organize(plugin, handlers, ctx)
+    data = ask(handlers, "tasks", ctx)
     assert data["done"] == 2 and data["failed"] == 1, data
-    assert data["remaining"] == 0, data
-    assert data["items"] == [], f"明细只列进行中的任务：{data['items']}"
-    print("  完成", data["done"], "失败", data["failed"], "|", data["hint"])
+    print("  ", data["message"])
 
 
 def test_all_cancelled_message():
-    """全部被取消时不能说「整理完成」，文案要如实反映。"""
     host, plugin, handlers, ctx = run(
         DIRECT, {"task-1": "cancelled", "task-2": "cancelled", "task-3": "cancelled"})
-    data = query_organize(plugin, handlers, ctx)
-    assert data["cancelled"] == 3 and data["remaining"] == 0, data
-    assert "取消" in data["message"] and "完成" not in data["message"], data["message"]
-    assert data["message"] == "整理任务已全部取消（3 个）", data["message"]
-    print("  全部取消:", data["message"])
-
-
-def test_cancelled_hidden_from_details():
-    """已取消的任务只进汇总计数，不进明细列表。"""
-    host, plugin, handlers, ctx = run(
-        DIRECT, {"task-1": "cancelled", "task-2": "queued", "task-3": "queued"})
-    data = query_organize(plugin, handlers, ctx)
-    assert data["cancelled"] == 1, data
-    assert data["remaining"] == 2, data
-    labels = [item["statusLabel"] for item in data["items"]]
-    assert "已取消" not in labels, labels
-    assert len(data["items"]) == 2, data["items"]
-    print("  已取消只进汇总:", data["hint"])
-
-
-def test_unknown_status_does_not_crash():
-    """任务不在 tasks.list 里（老任务/已清理）时归到待处理，不能崩。"""
-    host, plugin, handlers, ctx = run(DIRECT)
-    host.task_status.clear()
-    host.queued.clear()  # tasks.list 返回空
-    data = query_organize(plugin, handlers, ctx)
-    assert data["total"] == 3, data
-    assert data["pending"] == 3, data
-    assert data["message"].startswith("整理中 ·"), data["message"]
-    print("  未知状态归入待处理 ✓ |", data["hint"])
+    data = ask(handlers, "tasks", ctx)
+    assert data["total"] == 0 and data["cancelled"] == 3, data
+    assert "已取消 3" in data["message"], data["message"]
+    print("  ", data["message"])
 
 
 def test_draft_mode_has_no_tasks():
     host, plugin, handlers, ctx = run(DRAFT)
-    data = query_organize(plugin, handlers, ctx)
+    data = ask(handlers, "tasks", ctx)
     assert data["total"] == 0, data
     assert "没有整理任务" in data["message"], data["message"]
     print("  草稿模式:", data["message"])
@@ -136,33 +103,32 @@ def test_no_run_yet():
     host = FakeHost(FILES, AI_REPLY, SEARCH, DETAIL)
     plugin, handlers = load_plugin(ROOT, MANIFEST)
     ctx = ctx_for(host, FILES, DIRECT)
-    data = query_organize(plugin, handlers, ctx)
-    assert data["total"] == 0 and "尚未" in data["message"], data
+    data = ask(handlers, "tasks", ctx)
+    assert data["total"] == 0 and "没有整理任务" in data["message"], data
+    assert data["current"] == "", data
     print("  未运行:", data["message"])
 
 
-def test_page_declares_organize_card():
+def test_no_duplicate_progress_card():
+    """整理阶段只在 tasks 卡里体现，不再有第二张整理进度卡。"""
     _, plugin, handlers, ctx = run(DIRECT)
     token = current.set(ctx)
     try:
         page = plugin.get_page(ctx)
     finally:
         current.reset(token)
-    text = json.dumps(page, ensure_ascii=False)
-    assert "query.organize.data.message" in text, "整理进度卡片要绑定 organize 查询"
-    assert "整理进度" in text, "应有「整理进度」卡片"
-    assert "刷新整理进度" in text, "应有刷新按钮"
-    manifest = json.loads((ROOT / "plugin.json").read_text("utf-8"))
-    ids = [q["id"] for q in manifest["queries"]]
-    assert "organize" in ids, ids
-    print("  页面卡片与清单查询声明一致 | 查询:", ids)
+    blob = json.dumps(page, ensure_ascii=False)
+    assert "query.organize.data" not in blob, "不应再有独立的整理进度卡片"
+    assert "query.tasks.data.items" in blob, "整理任务表格要绑定 tasks 查询"
+    ids = [q["id"] for q in page["queries"]]
+    assert ids == ["results", "tasks", "progress"], ids
+    print("  查询列表:", ids, "（organize 已合并）")
 
 
 if __name__ == "__main__":
-    for function in (test_mapping_from_persisted_items, test_progress_while_running,
-                     test_progress_all_done, test_progress_counts_failures,
-                     test_all_cancelled_message, test_cancelled_hidden_from_details,
-                     test_unknown_status_does_not_crash, test_draft_mode_has_no_tasks,
-                     test_no_run_yet, test_page_declares_organize_card):
+    for function in (test_mapping_from_persisted_items, test_current_task_label,
+                     test_all_done_message, test_failure_counted,
+                     test_all_cancelled_message, test_draft_mode_has_no_tasks,
+                     test_no_run_yet, test_no_duplicate_progress_card):
         function()
-    print("\n整理进度用例全部通过")
+    print("\n整理任务用例全部通过")

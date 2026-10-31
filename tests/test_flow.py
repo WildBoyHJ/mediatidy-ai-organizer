@@ -127,8 +127,8 @@ def test_page_and_query():
     assert page["version"] == "2"
     assert page["queries"] == [
         {"id": "results", "name": "results",
-         "input": {"cursor": {"$ref": "state.cursor"}}},
-        {"id": "organize", "name": "organize", "input": {}},
+         "input": {"cursor": {"$ref": "state.cursor"},
+                   "status": {"$ref": "state.resultFilter"}}},
         {"id": "tasks", "name": "tasks",
          "input": {"cursor": {"$ref": "state.tasksCursor"}}},
         {"id": "progress", "name": "progress", "input": {}},
