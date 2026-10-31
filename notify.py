@@ -64,6 +64,42 @@ def build_summary(counts: dict, mode: str, profile_name: str, items: list[dict])
     return title[:MAX_TITLE], body
 
 
+def build_series(counts: dict, mode: str, profile_name: str,
+                 items: list[dict]) -> list[tuple[str, str]]:
+    """按「剧集」聚合：一部剧一条消息，而不是一集一条。
+
+    只统计真正入库的记录（已提交 / 已完成 / 已核对），
+    按 (tmdbId, 标题, 季) 分组，正文给出集数与集号区间。
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for item in items:
+        if item.get("status") not in ("organized", "submitted", "matched"):
+            continue
+        key = (item.get("tmdbId") or 0,
+               item.get("title") or item.get("name") or "",
+               item.get("season"))
+        groups.setdefault(key, []).append(item)
+
+    messages: list[tuple[str, str]] = []
+    for (_, title, season), rows in groups.items():
+        head = f"《{_safe(title, 60) or '未知'}》"
+        if isinstance(season, int) and season > 0:
+            head = f"{head} 第 {season} 季"
+        episodes = sorted({row.get("episode") for row in rows
+                           if isinstance(row.get("episode"), int) and row.get("episode") > 0})
+        body = [f"方案：{_safe(profile_name, 60) or '未知'}",
+                f"共 {len(rows)} 个文件"]
+        if len(episodes) > 1:
+            body.append(f"集数：{len(episodes)} 集（{episodes[0]}–{episodes[-1]}）")
+        elif episodes:
+            body.append(f"集数：第 {episodes[0]} 集")
+        body.append(f"模式：{'直接整理' if mode == 'direct' else '草稿审阅'}")
+        if int(counts.get("moved") or 0):
+            body.append(f"另有 {int(counts.get('moved'))} 个失败文件已移到失败目录")
+        messages.append((f"入库 · {head}"[:MAX_TITLE], "\n".join(body)))
+    return messages
+
+
 def build_progress_note(stage: str, detail: str = "") -> tuple[str, str]:
     """关键阶段的简短通知，避免刷屏。"""
     mapping = {

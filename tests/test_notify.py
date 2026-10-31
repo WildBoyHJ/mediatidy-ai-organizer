@@ -46,7 +46,9 @@ class NotifyHost(FakeHost):
 
 def run(host, config=None):
     plugin, handlers = load_plugin(ROOT, MANIFEST)
-    cfg = {"batchSize": 8, "yearTolerance": 1, "maxMinutes": 20}
+    # 这些用例验证「单条汇总」路径，显式关掉按剧集聚合
+    cfg = {"batchSize": 8, "yearTolerance": 1, "maxMinutes": 20,
+           "notifyBySeries": False}
     cfg.update(config or {})
     ctx = ctx_for(host, FILES, cfg)
     handlers[("action", "start")]({"profileId": 7, "mode": "draft"}, ctx)
@@ -100,6 +102,17 @@ def test_channel_fallback_to_granted():
     print("  留空: 回退到已授权通道 ✓")
 
 
+def test_series_notify_one_per_show():
+    """默认按剧集聚合：一部剧一条，不是一集一条。"""
+    host = run(NotifyHost(FILES, REPLY, {}, DETAIL), {"notifyBySeries": True})
+    assert len(host.sent) == 1, [m["title"] for m in host.sent]
+    msg = host.sent[0]
+    assert "入库" in msg["title"], msg["title"]
+    assert "人生切割术" in msg["title"], msg["title"]
+    assert "第 2 季" in msg["title"], msg["title"]
+    print("  按剧集通知 ✓", msg["title"])
+
+
 def test_summary_content():
     counts = {"total": 10, "matched": 7, "submitted": 7, "failed": 2,
               "unrecognized": 1, "identity_conflict": 0, "needs_review": 0}
@@ -117,6 +130,7 @@ def test_summary_content():
 
 if __name__ == "__main__":
     test_success_notifies()
+    test_series_notify_one_per_show()
     test_failure_notifies()
     test_notify_disabled()
     test_notify_failure_does_not_break()

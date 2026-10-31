@@ -83,7 +83,7 @@ def test_already_moved_skipped():
 def test_start_saves_failed_dir():
     host, plugin, handlers, ctx = fresh()
     handlers[("action", "start")](
-        {"profileId": 7, "mode": "direct", "failedDir": FAILED_DIR}, ctx)
+        {"profileId": 7, "mode": "direct", "failedRootId": "root-1", "failedPath": "fail"}, ctx)
     flow = host.kv["flows/flow-1"]["value"]
     assert flow["failedDir"] == FAILED_DIR, flow.get("failedDir")
     settings = host.kv["settings"]["value"]
@@ -112,7 +112,8 @@ def test_page_has_picker():
     assert "失败目录（可选）" in blob
     assert "access" in blob and "write" in blob, "选择器需要写权限"
     start = [a for a in MANIFEST["actions"] if a["id"] == "start"][0]
-    assert "failedDir" in start["inputSchema"]["properties"], "start 要接收 failedDir"
+    assert "failedRootId" in start["inputSchema"]["properties"]
+    assert "failedPath" in start["inputSchema"]["properties"]
     print("  页面选择器与清单入参就位")
 
 

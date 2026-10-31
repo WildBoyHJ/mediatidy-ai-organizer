@@ -1,7 +1,7 @@
 {
   "id": "ai.tmdb-organizer",
   "name": "AI 识别整理",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "sdkVersion": "2",
   "author": "Minis",
   "description": "用 AI 识别文件名，到 TMDB 核对作品身份，再按整理方案改名归档。支持草稿审阅与直接整理两种模式；AI 不可用时退回本地文件名解析。",
@@ -66,6 +66,12 @@
       "default": true
     },
     {
+      "key": "notifyBySeries",
+      "label": "按剧集聚合通知（一部剧一条）",
+      "type": "boolean",
+      "default": true
+    },
+    {
       "key": "notifyChannelId",
       "label": "通知通道 ID（留空则用第一个已授权通道）",
       "type": "text",
@@ -110,6 +116,9 @@
       "notifyChannelId": {
         "type": "string",
         "maxLength": 120
+      },
+      "notifyBySeries": {
+        "type": "boolean"
       }
     },
     "additionalProperties": false
@@ -151,21 +160,13 @@
               "direct"
             ]
           },
-          "failedDir": {
-            "type": "object",
-            "properties": {
-              "rootId": {
-                "type": "string"
-              },
-              "path": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "rootId",
-              "path"
-            ],
-            "additionalProperties": false
+          "failedRootId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "failedPath": {
+            "type": "string",
+            "maxLength": 1000
           }
         },
         "required": [

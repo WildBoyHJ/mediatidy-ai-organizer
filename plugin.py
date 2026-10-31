@@ -41,6 +41,8 @@ TASK_PAGE_SIZE = 20
 # 识别结果的状态筛选取值（顺序即页面下拉顺序）
 RESULTS_FILTERS = ("all", "identified", "matched", "submitted", "organized",
                    "unrecognized", "identity_conflict", "needs_review", "failed")
+# 按剧集聚合通知时，单轮最多发几条，避免一次刷几十条
+NOTIFY_SERIES_LIMIT = 20
 STALE_MINUTES = 15
 
 
@@ -131,9 +133,17 @@ class Plugin(BasePlugin):
                 ui.Button(
                     label="开始识别与整理",
                     onClick=[{"type": "invoke", "actionId": "start",
-                              "input": {"profileId": ui.ref("state.profileId"),
-                                        "mode": ui.ref("state.mode"),
-                                        "failedDir": ui.ref("state.failedDir")}}],
+                              "input": {
+                                  "profileId": ui.ref("state.profileId"),
+                                  "mode": ui.ref("state.mode"),
+                                  # 目录选择器未选时是 null，拆成两个字符串避免 schema 类型不符
+                                  "failedRootId": ui.expr(
+                                      "if", ui.ref("state.failedDir"),
+                                      ui.ref("state.failedDir.rootId"), ""),
+                                  "failedPath": ui.expr(
+                                      "if", ui.ref("state.failedDir"),
+                                      ui.ref("state.failedDir.path"), ""),
+                              }}],
                     disabled=ui.expr("not", ready),
                 ),
                 ui.Text(text=ui.expr(
@@ -1725,12 +1735,14 @@ class Plugin(BasePlugin):
 
     @staticmethod
     def _failed_dir(input: dict) -> dict | None:
-        """解析页面传来的失败目录（目录选择器给的是 {rootId, path}）。"""
-        raw = input.get("failedDir")
-        if not isinstance(raw, dict):
-            return None
-        root_id = str(raw.get("rootId") or "")
-        path = raw.get("path")
+        """解析失败目录。
+
+        宿主 schema 只接受单一 type，目录选择器没选时会给 null，
+        直接传对象会在校验阶段报「须为对象」，所以拆成两个字符串传：
+        failedRootId + failedPath，空串表示未设置。
+        """
+        root_id = str(input.get("failedRootId") or "").strip()
+        path = input.get("failedPath")
         if not root_id or not isinstance(path, str):
             return None
         return {"rootId": root_id, "path": path}
@@ -1828,15 +1840,35 @@ class Plugin(BasePlugin):
 
     def _notify_result(self, ctx: Context, counts: dict, mode: str,
                        profile_name: str, results: list[dict]) -> None:
-        """把本轮结果发到通知通道。失败只记日志，绝不影响整理结果。"""
+        """把本轮结果发到通知通道。失败只记日志，绝不影响整理结果。
+
+        默认按「剧集」聚合：一部剧一条，避免像 MT 的 task.item 那样一集一条。
+        关掉 notifyBySeries 则退回单条汇总。
+        """
         if not self._notify_enabled(ctx):
             return
         try:
-            title, body = notify.build_summary(counts, mode, profile_name, results)
             channel = self._notify_channel(ctx)
             if not channel:
                 ctx.mt.log(level="warn", message="通知已开启但未选择通知通道，跳过发送")
                 return
+            if self._notify_by_series(ctx):
+                messages = notify.build_series(counts, mode, profile_name, results)
+                if not messages:
+                    title, body = notify.build_summary(counts, mode, profile_name, results)
+                    ctx.mt.notification.send(channel_id=channel, title=title, content=body)
+                    ctx.mt.log(level="info", message=f"已发送结果通知：{title}")
+                    return
+                for title, body in messages[:NOTIFY_SERIES_LIMIT]:
+                    ctx.mt.notification.send(channel_id=channel, title=title, content=body)
+                if len(messages) > NOTIFY_SERIES_LIMIT:
+                    ctx.mt.log(level="warn",
+                               message=f"本轮涉及 {len(messages)} 部作品，仅发送前 "
+                                       f"{NOTIFY_SERIES_LIMIT} 条通知")
+                ctx.mt.log(level="info",
+                           message=f"已按剧集发送 {min(len(messages), NOTIFY_SERIES_LIMIT)} 条通知")
+                return
+            title, body = notify.build_summary(counts, mode, profile_name, results)
             ctx.mt.notification.send(channel_id=channel, title=title, content=body)
             ctx.mt.log(level="info", message=f"已发送结果通知：{title}")
         except SDKError as error:
@@ -1849,6 +1881,12 @@ class Plugin(BasePlugin):
     def _notify_enabled(ctx: Context) -> bool:
         """默认开启；只有显式配置为 false 才关闭。"""
         value = ctx.config.get("notifyEnabled")
+        return True if value is None else bool(value)
+
+    @staticmethod
+    def _notify_by_series(ctx: Context) -> bool:
+        """默认按剧集聚合（一部剧一条）；显式 false 则发单条汇总。"""
+        value = ctx.config.get("notifyBySeries")
         return True if value is None else bool(value)
 
     @staticmethod
