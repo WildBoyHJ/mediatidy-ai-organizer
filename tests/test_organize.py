@@ -84,8 +84,21 @@ def test_progress_counts_failures():
     data = query_organize(plugin, handlers, ctx)
     assert data["done"] == 2 and data["failed"] == 1, data
     assert data["remaining"] == 0, data
-    assert any(item["statusLabel"] == "失败" for item in data["items"]), data["items"]
+    assert data["items"] == [], f"明细只列进行中的任务：{data['items']}"
     print("  完成", data["done"], "失败", data["failed"], "|", data["hint"])
+
+
+def test_cancelled_hidden_from_details():
+    """已取消的任务只进汇总计数，不进明细列表。"""
+    host, plugin, handlers, ctx = run(
+        DIRECT, {"task-1": "cancelled", "task-2": "queued", "task-3": "queued"})
+    data = query_organize(plugin, handlers, ctx)
+    assert data["cancelled"] == 1, data
+    assert data["remaining"] == 2, data
+    labels = [item["statusLabel"] for item in data["items"]]
+    assert "已取消" not in labels, labels
+    assert len(data["items"]) == 2, data["items"]
+    print("  已取消只进汇总:", data["hint"])
 
 
 def test_unknown_status_does_not_crash():
@@ -137,6 +150,7 @@ def test_page_declares_organize_card():
 if __name__ == "__main__":
     for function in (test_mapping_from_persisted_items, test_progress_while_running,
                      test_progress_all_done, test_progress_counts_failures,
+                     test_cancelled_hidden_from_details,
                      test_unknown_status_does_not_crash, test_draft_mode_has_no_tasks,
                      test_no_run_yet, test_page_declares_organize_card):
         function()

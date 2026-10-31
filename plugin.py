@@ -29,8 +29,10 @@ AI_CHAT_LIMIT = 78
 SAFE_FILES = 400
 TMDB_SEARCH_LIMIT = 500
 # 任务状态的归类：终态失败 / 仍可取消
-CANCEL_SETTLED = ("failed", "cancelled", "interrupted", "outcome_unknown")
+# 任务状态归类：仍可取消 / 终态失败 / 已取消
 CANCELABLE = ("submitting", "queued", "running", "waiting")
+FAILED_STATES = ("failed", "interrupted", "outcome_unknown")
+CANCELLED_STATE = "cancelled"
 # tasks.cancel 单次调用上限
 CANCEL_LIMIT = 500
 TASK_PAGE_SIZE = 20
@@ -191,11 +193,11 @@ class Plugin(BasePlugin):
                     direction="row", gap="sm",
                 ),
                 ui.Text(
-                    text="取消不可撤销：已完成的任务不受影响，排队与执行中的会立即终止。",
+                    text="只列进行中与等待中的任务；已完成、失败、已取消的刷新后不再显示。取消不可撤销。",
                     tone="warning",
                     size="sm",
                 ),
-                title="任务列表",
+                title="任务列表（待处理）",
                 visible=ui.expr(
                     "gt",
                     ui.expr("coalesce", ui.ref("query.tasks.data.total"), 0),
@@ -1089,7 +1091,7 @@ class Plugin(BasePlugin):
 
     @query("tasks")
     def tasks(self, input: dict, ctx: Context) -> dict:
-        """整理任务列表，支持分页；每行带状态，供页面逐个取消。"""
+        """待处理的整理任务列表：只列进行中与等待中的，已结束（含已取消）的不再占位。"""
         try:
             offset = max(0, int(str(input.get("cursor") or "0")))
         except (TypeError, ValueError):
@@ -1098,19 +1100,27 @@ class Plugin(BasePlugin):
         if not rows:
             return {"items": [], "nextCursor": "", "total": 0, "cancellable": 0,
                     "message": "本轮没有整理任务"}
-        page = rows[offset:offset + TASK_PAGE_SIZE]
-        following = offset + TASK_PAGE_SIZE
-        cancelled = sum(1 for row in rows if row["status"] in CANCEL_SETTLED)
+        pending = [row for row in rows if row["active"]]
         done = sum(1 for row in rows if row["status"] == "done")
-        cancellable = sum(1 for row in rows if row["cancellable"])
+        cancelled = sum(1 for row in rows if row["status"] == CANCELLED_STATE)
+        failed = sum(1 for row in rows if row["status"] in FAILED_STATES)
+        if not pending:
+            # 全部结束：列表清空，卡片随之隐藏，汇总信息仍可通过整理进度查看
+            return {"items": [], "nextCursor": "", "total": 0, "cancellable": 0,
+                    "done": done, "cancelled": cancelled, "failed": failed,
+                    "message": f"没有待处理的整理任务（已完成 {done}，已取消 {cancelled}，失败 {failed}）"}
+        page = pending[offset:offset + TASK_PAGE_SIZE]
+        following = offset + TASK_PAGE_SIZE
         return {
             "items": [{"ref": row["ref"], "label": row["label"],
                        "statusLabel": row["statusLabel"]} for row in page],
-            "nextCursor": str(following) if following < len(rows) else "",
-            "total": len(rows),
-            "cancellable": cancellable,
-            "message": f"共 {len(rows)} 个整理任务：完成 {done}，已取消/失败 {cancelled}，"
-                       f"可取消 {cancellable}",
+            "nextCursor": str(following) if following < len(pending) else "",
+            "total": len(pending),
+            "cancellable": len(pending),
+            "done": done,
+            "cancelled": cancelled,
+            "failed": failed,
+            "message": f"当前 {len(pending)} 个待处理（已完成 {done}，已取消 {cancelled}，失败 {failed}）",
         }
 
     @action("cancel-task")
@@ -1156,6 +1166,7 @@ class Plugin(BasePlugin):
         if not pairs:
             return []
         statuses = self._task_statuses(ctx, {pair["ref"] for pair in pairs})
+        terminal = {"done", CANCELLED_STATE, *FAILED_STATES}
         rows = []
         for pair in pairs:
             status = statuses.get(pair["ref"], "")
@@ -1165,6 +1176,7 @@ class Plugin(BasePlugin):
                 "status": status,
                 "statusLabel": self._task_status_label(status),
                 "cancellable": status in CANCELABLE,
+                "active": status not in terminal,
             })
         return rows
 
@@ -1181,8 +1193,8 @@ class Plugin(BasePlugin):
         所以这里读 tasks.list 的任务状态自行汇总；页面靠刷新按钮更新
         —— 宿主只在整轮运行结束后才自动刷新查询。
         """
-        empty = {"total": 0, "done": 0, "failed": 0, "remaining": 0, "running": 0,
-                 "pending": 0, "message": "尚未提交整理任务", "current": "",
+        empty = {"total": 0, "done": 0, "failed": 0, "cancelled": 0, "remaining": 0,
+                 "running": 0, "pending": 0, "message": "尚未提交整理任务", "current": "",
                  "hint": "", "items": []}
         if not self._current_flow(ctx):
             return empty
@@ -1190,29 +1202,31 @@ class Plugin(BasePlugin):
         if not rows:
             return {**empty, "message": "本轮没有整理任务（草稿模式，或没有可整理的文件）"}
 
-        done = failed = running = pending = 0
+        done = failed = cancelled = running = pending = 0
         current_label = ""
         active: list[dict] = []
-        broken: list[dict] = []
         for row in rows:
             status = row["status"]
-            entry = {"ref": row["ref"], "label": row["label"], "statusLabel": row["statusLabel"]}
             if status == "done":
                 done += 1
-            elif status in CANCEL_SETTLED:
+            elif status == CANCELLED_STATE:
+                # 已取消的不再列入明细，只在汇总里计数
+                cancelled += 1
+            elif status in FAILED_STATES:
                 failed += 1
-                broken.append(entry)
             elif status == "running":
                 running += 1
-                active.append(entry)
+                active.append({"ref": row["ref"], "label": row["label"],
+                               "statusLabel": row["statusLabel"]})
                 if not current_label:
                     current_label = row["label"]
             else:
                 pending += 1
-                active.append(entry)
+                active.append({"ref": row["ref"], "label": row["label"],
+                               "statusLabel": row["statusLabel"]})
 
         total = len(rows)
-        remaining = total - done - failed
+        remaining = total - done - failed - cancelled
         if not current_label and active:
             current_label = active[0]["label"]
         if remaining <= 0:
@@ -1221,12 +1235,12 @@ class Plugin(BasePlugin):
             message = f"整理中 {done}/{total} · 正在整理 {current_label}"
         else:
             message = f"整理中 {done}/{total} · 剩余 {remaining}"
-        hint = (f"已完成 {done} · 失败 {failed} · 剩余 {remaining}"
+        hint = (f"已完成 {done} · 失败 {failed} · 已取消 {cancelled} · 剩余 {remaining}"
                 f"（进行中 {running} / 排队 {pending}）")
-        return {"total": total, "done": done, "failed": failed, "remaining": remaining,
-                "running": running, "pending": pending, "message": message,
-                "current": current_label, "hint": hint,
-                "items": (active + broken)[:10]}
+        return {"total": total, "done": done, "failed": failed, "cancelled": cancelled,
+                "remaining": remaining, "running": running, "pending": pending,
+                "message": message, "current": current_label, "hint": hint,
+                "items": active[:10]}
 
     @staticmethod
     def _task_status_label(status: str) -> str:

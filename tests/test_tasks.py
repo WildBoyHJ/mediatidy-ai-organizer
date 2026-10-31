@@ -58,15 +58,31 @@ def act(handlers, name: str, ctx, payload: dict) -> dict:
         current.reset(token)
 
 
-def test_list_and_message():
-    host, plugin, handlers, ctx = run({"task-1": "done", "task-2": "queued"})
+def test_list_only_pending():
+    """已完成/失败/已取消的不占列表位，只留进行中与等待中。"""
+    host, plugin, handlers, ctx = run(
+        {"task-1": "done", "task-2": "cancelled", "task-3": "queued"})
     data = ask(handlers, "tasks", ctx)
-    assert data["total"] == 3, data
-    assert data["cancellable"] == 2, data  # done 的不算可取消
-    assert data["message"].startswith("共 3 个整理任务"), data["message"]
-    keys = {item["ref"] for item in data["items"]}
-    assert keys == {"task-1", "task-2", "task-3"}, keys
-    print("  ", data["message"])
+    refs = [item["ref"] for item in data["items"]]
+    assert refs == ["task-3"], refs
+    assert data["total"] == 1, data
+    assert data["done"] == 1 and data["cancelled"] == 1, data
+    print("  列表只剩待处理:", data["message"])
+
+
+def test_cancelled_task_disappears_after_cancel():
+    """取消一个任务后刷新列表，它应当从列表里消失。"""
+    host, plugin, handlers, ctx = run(
+        {"task-1": "done", "task-2": "queued", "task-3": "running"})
+    before = ask(handlers, "tasks", ctx)
+    assert before["total"] == 2, before
+    act(handlers, "cancel-task", ctx, {"ref": "task-2"})
+    after = ask(handlers, "tasks", ctx)
+    refs = [item["ref"] for item in after["items"]]
+    assert "task-2" not in refs, f"已取消的任务不该再显示：{refs}"
+    assert after["total"] == 1, after
+    assert after["cancelled"] == 1, after
+    print("  取消后列表:", refs, "|", after["message"])
 
 
 def test_paging():
@@ -153,7 +169,8 @@ def test_manifest_and_page():
 
 
 if __name__ == "__main__":
-    for function in (test_list_and_message, test_paging, test_cancel_single,
+    for function in (test_list_only_pending, test_cancelled_task_disappears_after_cancel,
+                     test_paging, test_cancel_single,
                      test_cancel_rejects_foreign_ref, test_cancel_requires_ref,
                      test_cancel_all_skips_finished,
                      test_cancel_all_failure_does_not_raise, test_manifest_and_page):
