@@ -183,6 +183,33 @@ AI 识别整理 · 直接整理｜成功 7，未处理 3
 
 筛选在插件侧完成（宿主 `Table` 只支持关键词搜索，没有按列过滤），游标按「已读到的原始条目数」推进，翻页不会重复。表格同时开了搜索框，可以按文件名/作品名再过滤一遍。
 
+## 失败目录
+
+「开始」卡片里可以指定一个**失败目录**（选填）：
+
+```
+失败目录（可选）  [ 选择目录 ]
+选填：填了就把「未识别 / 身份冲突 / 需人工处理」的文件移到这里；留空则原地不动。
+```
+
+- **只动这三类**：`未识别`、`身份冲突`、`需人工处理`
+- **不动这两类**：`已核对（可整理）`、`已提交` —— 它们会被整理走，不该被移
+- 已移动过的记录会跳过，幂等键是 `<flow>:failmv:<文件 ref>`
+- 单个移动失败只在「说明」列写 `移到失败目录失败（错误码）`，不中断整轮
+- 汇总计数多一个 `moved`，通知里多一行 `📦 已移到失败目录 N`
+
+### 需要什么权限
+
+`files.move` 同时检查**源和目标**：
+
+| 位置 | 要求 |
+|---|---|
+| 插件能力 | `files.write`（已声明） |
+| 源文件所在根 | **写**权限（文件要移出去） |
+| 失败目录所在根 | **写**权限 |
+
+授权页里给这两个根勾上「写入」，否则移动会被拒（说明列会写明错误码）。
+
 ## 结果状态
 
 | 状态 | 含义 |
@@ -235,7 +262,7 @@ uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<�
 全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
 
 ```bash
-for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks test_refresh test_steps test_filter; do
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks test_refresh test_steps test_filter test_failed_move; do
   .venv/bin/python tests/$t.py
 done
 .venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查
