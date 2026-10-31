@@ -36,6 +36,8 @@ class FakeHost:
         self.cancelled: list[str] = []
         self.fail_cancel = False
         self.extra_tasks: list[dict] = []
+        self.moved: list[dict] = []
+        self.fail_move = False
 
     def call(self, invocation, name, value):
         self.calls.append((name, value))
@@ -111,6 +113,13 @@ class FakeHost:
         self.queued.append(value)
         return {"ref": f"task-{len(self.queued)}", "runId": "t", "kind": "organize",
                 "status": "queued", "total": 1, "completed": 0, "failed": 0, "updatedAt": ""}
+
+    def m_files_move(self, value):
+        if self.fail_move:
+            from mt_plugin import SDKError
+            raise SDKError("移动被拒绝", "MOVE_DENIED")
+        self.moved.append(value)
+        return {"ok": True}
 
     def m_tasks_wait(self, value):
         self.waiting.extend(value["refs"])

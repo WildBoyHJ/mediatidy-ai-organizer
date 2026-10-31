@@ -42,6 +42,9 @@ def build_summary(counts: dict, mode: str, profile_name: str, items: list[dict])
         lines.append(f"⚠️ 身份冲突：{conflict}")
     if review:
         lines.append(f"👀 需人工处理：{review}")
+    moved = int(counts.get("moved") or 0)
+    if moved:
+        lines.append(f"📦 已移到失败目录：{moved}")
 
     problems = [item for item in items if item.get("status") in
                 ("failed", "identity_conflict", "needs_review")]

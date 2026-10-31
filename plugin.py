@@ -92,6 +92,9 @@ class Plugin(BasePlugin):
         last_mode = settings.get("lastMode")
         if last_mode not in ("draft", "direct"):
             last_mode = "draft"
+        last_failed = settings.get("lastFailedDir")
+        if not isinstance(last_failed, dict) or not last_failed.get("rootId"):
+            last_failed = None
 
         running = ui.expr("or",
                           ui.expr("eq", ui.ref("run.status"), "queued"),
@@ -115,11 +118,22 @@ class Plugin(BasePlugin):
                 ]),
                 ui.Text(text="2. 选择要处理的视频文件或目录"),
                 ui.FilePicker(),
+                ui.DirectoryPicker(
+                    label="失败目录（可选）",
+                    bind="state.failedDir",
+                    access="write",
+                ),
+                ui.Text(
+                    text="选填：填了就把「未识别 / 身份冲突 / 需人工处理」的文件移到这里；留空则原地不动。",
+                    tone="muted",
+                    size="sm",
+                ),
                 ui.Button(
                     label="开始识别与整理",
                     onClick=[{"type": "invoke", "actionId": "start",
                               "input": {"profileId": ui.ref("state.profileId"),
-                                        "mode": ui.ref("state.mode")}}],
+                                        "mode": ui.ref("state.mode"),
+                                        "failedDir": ui.ref("state.failedDir")}}],
                     disabled=ui.expr("not", ready),
                 ),
                 ui.Text(text=ui.expr(
@@ -279,7 +293,7 @@ class Plugin(BasePlugin):
             ),
             ui.Card(ui.RunHistory(), title="运行记录"),
             state={"cursor": "", "mode": last_mode, "profileId": last_profile,
-                   "tasksCursor": "", "resultFilter": "all"},
+                   "tasksCursor": "", "resultFilter": "all", "failedDir": last_failed},
             queries=[{"id": "results", "name": "results",
                       "input": {"cursor": ui.ref("state.cursor"),
                                 "status": ui.ref("state.resultFilter")}},
@@ -306,6 +320,7 @@ class Plugin(BasePlugin):
             "profileId": profile_id,
             "mode": mode,
             "options": options,
+            "failedDir": self._failed_dir(input),
             "scanRefs": [],
             "stage": "scan" if dirs else "identify",
         })
@@ -323,6 +338,7 @@ class Plugin(BasePlugin):
         settings = dict(saved["value"]) if saved["found"] else {"schemaVersion": 1}
         settings["lastProfileId"] = profile_id
         settings["lastMode"] = mode
+        settings["lastFailedDir"] = self._failed_dir(input)
         ctx.mt.storage.set(key="settings", value=settings)
 
         if not dirs:
@@ -496,7 +512,14 @@ class Plugin(BasePlugin):
         results = self._check_series(results)
         self._persist(ctx, flow_key, results)
 
+        # 整理不出来的（未识别 / 身份冲突 / 需人工）按需移到用户指定的失败目录
+        failed_dir = (self._load_flow(ctx, flow_key) or {}).get("failedDir")
+        moved = self._move_failed(ctx, flow_key, results, failed_dir)
+        if moved:
+            self._persist(ctx, flow_key, results)
+
         counts = self._counts(results)
+        counts["moved"] = moved
         ready = [item for item in results if item["status"] == "matched"]
         summary = {
             "status": "submitting" if ready else "done",
@@ -1165,7 +1188,7 @@ class Plugin(BasePlugin):
                     "tmdb": str(record.get("tmdbId") or ""),
                     "episodeLabel": self._episode_label(record),
                     "statusLabel": self._status_label(record.get("status", "")),
-                    "reason": record.get("reason", ""),
+                    "reason": self._reason_with_move(record),
                     "aiRaw": (record.get("preview") or {}).get("text", "")[:600],
                 })
                 if status_filter != "all" and len(items) >= 20:
@@ -1683,6 +1706,71 @@ class Plugin(BasePlugin):
             "extra": extra if isinstance(extra, str) else "",
             "minConfidence": 0.5,
         }
+
+    # 整理不出来、需要移到失败目录的状态
+    FAILED_MOVABLE = ("unrecognized", "identity_conflict", "needs_review")
+
+    @staticmethod
+    def _reason_with_move(record: dict) -> str:
+        """说明列里补一句移动结果，省掉一个表格列。"""
+        reason = record.get("reason", "") or ""
+        moved_to = record.get("movedTo")
+        if moved_to:
+            suffix = f"已移到失败目录 {moved_to}"
+            return f"{reason} · {suffix}" if reason else suffix
+        if record.get("moveError"):
+            suffix = f"移到失败目录失败（{record['moveError']}）"
+            return f"{reason} · {suffix}" if reason else suffix
+        return reason
+
+    @staticmethod
+    def _failed_dir(input: dict) -> dict | None:
+        """解析页面传来的失败目录（目录选择器给的是 {rootId, path}）。"""
+        raw = input.get("failedDir")
+        if not isinstance(raw, dict):
+            return None
+        root_id = str(raw.get("rootId") or "")
+        path = raw.get("path")
+        if not root_id or not isinstance(path, str):
+            return None
+        return {"rootId": root_id, "path": path}
+
+    def _move_failed(self, ctx: Context, flow_key: str, results: list[dict],
+                     failed_dir: Any) -> int:
+        """把整理不出来的文件移到用户指定的失败目录；没配置就什么都不做。
+
+        只动「未识别 / 身份冲突 / 需人工处理」三类 —— 已提交整理的不碰，
+        移动失败只记日志并写入 moveError，绝不中断主流程。
+        """
+        if not isinstance(failed_dir, dict):
+            return 0
+        root_id = str(failed_dir.get("rootId") or "")
+        path = str(failed_dir.get("path") or "")
+        if not root_id:
+            return 0
+        targets = [row for row in results
+                   if row.get("status") in self.FAILED_MOVABLE and not row.get("movedTo")]
+        if not targets:
+            return 0
+        moved = 0
+        for index, record in enumerate(targets):
+            self._report(ctx, "移动失败文件", index, len(targets), record.get("name", ""))
+            try:
+                ctx.mt.files.move(
+                    file_ref=record["ref"],
+                    destination={"rootId": root_id, "path": path},
+                    overwrite=False,
+                    idempotency_key=f"{flow_key}:failmv:{record.get('ref')}",
+                )
+                record["movedTo"] = path or "."
+                moved += 1
+            except SDKError as error:
+                record["moveError"] = error.code
+                ctx.mt.log(level="warn",
+                           message=f"移动失败文件 {record.get('name', '')} 失败：{error.code}")
+        ctx.mt.log(level="info",
+                   message=f"失败文件已移动 {moved}/{len(targets)} 个到 {path or '/'}")
+        return moved
 
     def _check_profile(self, ctx: Context, profile_id: int) -> dict:
         """校验方案可用性。
