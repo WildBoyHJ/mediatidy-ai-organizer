@@ -32,6 +32,7 @@ class FakeHost:
         self.queued: list[dict] = []
         self.waiting: list[str] = []
         self.progress: list[dict] = []
+        self.task_status: dict[str, str] = {}
 
     def call(self, invocation, name, value):
         self.calls.append((name, value))
@@ -111,6 +112,17 @@ class FakeHost:
     def m_tasks_wait(self, value):
         self.waiting.extend(value["refs"])
         return {"waiting": True}
+
+    def m_tasks_list(self, value):
+        """把已提交的整理任务按 task_status 里的设定回放成任务列表。"""
+        items = []
+        for index in range(len(self.queued)):
+            ref = f"task-{index + 1}"
+            status = self.task_status.get(ref, "queued")
+            items.append({"ref": ref, "runId": "t", "kind": "organize", "status": status,
+                          "total": 1, "completed": 1 if status == "done" else 0,
+                          "failed": 1 if status == "failed" else 0, "updatedAt": ""})
+        return {"items": items, "nextCursor": ""}
 
     def m_storage_set(self, value):
         self.kv[value["key"]] = {"found": True, "value": value["value"], "revision": "1", "bytes": 0}

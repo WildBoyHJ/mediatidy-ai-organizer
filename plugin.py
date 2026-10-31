@@ -28,6 +28,8 @@ AI_CHAT_LIMIT = 78
 # 留出余量，默认每轮最多处理这么多文件。
 SAFE_FILES = 400
 TMDB_SEARCH_LIMIT = 500
+# 整理任务映射每次写 50 条，400 个文件只需 8 次 storage 写入
+TASKMAP_CHUNK = 50
 
 
 def _now() -> str:
@@ -113,6 +115,41 @@ class Plugin(BasePlugin):
                 title=ui.expr("if", running, "进度 · 运行中", "进度"),
             ),
             ui.Card(
+                ui.Progress(
+                    label=ui.ref("query.organize.data.message"),
+                    value=ui.ref("query.organize.data.done"),
+                    total=ui.ref("query.organize.data.total"),
+                ),
+                ui.Text(text=ui.ref("query.organize.data.current"), tone="primary", size="sm"),
+                ui.Text(text=ui.ref("query.organize.data.hint"), tone="muted", size="sm"),
+                ui.Table(
+                    source=ui.ref("query.organize.data.items"),
+                    rowKey="ref",
+                    pageSize=10,
+                    columns=[
+                        {"label": "作品", "field": "label", "cells": []},
+                        {"label": "状态", "field": "statusLabel", "cells": []},
+                    ],
+                ),
+                ui.Text(
+                    text="整理由 MT 执行，这里读任务状态汇总；刷新后更新（整轮结束后宿主会自动刷新）。",
+                    tone="muted",
+                    size="sm",
+                ),
+                ui.Button(
+                    label="刷新整理进度",
+                    variant="outline",
+                    onClick=[{"type": "query", "queryId": "organize"},
+                             {"type": "query", "queryId": "results"}],
+                ),
+                title="整理进度",
+                visible=ui.expr(
+                    "gt",
+                    ui.expr("coalesce", ui.ref("query.organize.data.total"), 0),
+                    0,
+                ),
+            ),
+            ui.Card(
                 ui.Table(
                     source=ui.ref("query.results.data.items"),
                     rowKey="id",
@@ -144,7 +181,8 @@ class Plugin(BasePlugin):
             ),
             ui.Card(ui.RunHistory(), title="运行记录"),
             state={"cursor": "", "mode": "draft"},
-            queries=[{"id": "results", "name": "results", "input": {"cursor": ui.ref("state.cursor")}}],
+            queries=[{"id": "results", "name": "results", "input": {"cursor": ui.ref("state.cursor")}},
+                     {"id": "organize", "name": "organize", "input": {}}],
         )
 
     # ---------------------------------------------------------------- 入口动作
@@ -885,6 +923,7 @@ class Plugin(BasePlugin):
 
     def _submit_direct(self, ctx: Context, flow_key: str, ready: list[dict], profile_id: int) -> list[str]:
         refs: list[str] = []
+        pairs: list[dict] = []
         total = len(ready)
         for index, record in enumerate(ready):
             ctx.mt.runtime.checkpoint()
@@ -911,6 +950,9 @@ class Plugin(BasePlugin):
             record["taskStatus"] = task.get("status", "queued")
             record["reason"] = "已入队"
             refs.append(task["ref"])
+            pairs.append({"ref": task["ref"], "label": self._task_label(record)})
+        # 映射必须在 tasks.wait 之前写入：登记等待后再调 SDK 会收到 FLOW_WAITING
+        self._save_taskmap(ctx, flow_key, pairs)
         self._patch_flow(ctx, flow_key, {"taskRefs": refs, "organizeParent": ctx.run_id,
                                          "stage": "organize"})
         self._persist(ctx, flow_key, ready)
@@ -993,6 +1035,133 @@ class Plugin(BasePlugin):
                       f"已提交 {counts.get('submitted', 0)}，失败 {counts.get('failed', 0)}）"
         return {"items": items, "nextCursor": page.get("nextCursor", ""), "message": message,
                 "status": summary.get("status", "")}
+
+    @query("organize")
+    def organize(self, input: dict, ctx: Context) -> dict:
+        """整理阶段的实时进度。
+
+        整理由宿主执行，等待期间插件不在线（tasks.wait 后调用 SDK 会 FLOW_WAITING），
+        所以这里读 tasks.list 的任务状态自行汇总；页面靠刷新按钮更新
+        —— 宿主只在整轮运行结束后才自动刷新查询。
+        """
+        empty = {"total": 0, "done": 0, "failed": 0, "remaining": 0, "running": 0,
+                 "pending": 0, "message": "尚未提交整理任务", "current": "",
+                 "hint": "", "items": []}
+        current = ctx.mt.storage.get(key="currentRun")
+        if not current["found"]:
+            return empty
+        flow_key = current["value"]
+        pairs = self._load_taskmap(ctx, flow_key)
+        if not pairs:
+            return {**empty, "message": "本轮没有整理任务（草稿模式，或没有可整理的文件）"}
+
+        labels = {pair.get("ref", ""): pair.get("label", "") for pair in pairs}
+        statuses = self._task_statuses(ctx, set(labels))
+        done = failed = running = pending = 0
+        current_label = ""
+        active: list[dict] = []
+        broken: list[dict] = []
+        for ref, label in labels.items():
+            status = statuses.get(ref, "")
+            row = {"ref": ref, "label": label, "statusLabel": self._task_status_label(status)}
+            if status == "done":
+                done += 1
+            elif status in ("failed", "cancelled", "interrupted", "outcome_unknown"):
+                failed += 1
+                broken.append(row)
+            elif status == "running":
+                running += 1
+                active.append(row)
+                if not current_label:
+                    current_label = label
+            else:
+                pending += 1
+                active.append(row)
+
+        total = len(labels)
+        remaining = total - done - failed
+        if not current_label and active:
+            current_label = active[0]["label"]
+        if remaining <= 0:
+            message = f"整理完成 {done}/{total}"
+        elif current_label:
+            message = f"整理中 {done}/{total} · 正在整理 {current_label}"
+        else:
+            message = f"整理中 {done}/{total} · 剩余 {remaining}"
+        hint = (f"已完成 {done} · 失败 {failed} · 剩余 {remaining}"
+                f"（进行中 {running} / 排队 {pending}）")
+        return {"total": total, "done": done, "failed": failed, "remaining": remaining,
+                "running": running, "pending": pending, "message": message,
+                "current": current_label, "hint": hint,
+                "items": (active + broken)[:10]}
+
+    @staticmethod
+    def _task_status_label(status: str) -> str:
+        return {
+            "running": "正在整理",
+            "queued": "排队中",
+            "submitting": "提交中",
+            "waiting": "等待中",
+            "done": "已完成",
+            "failed": "失败",
+            "cancelled": "已取消",
+            "interrupted": "被中断",
+            "outcome_unknown": "结果未知",
+        }.get(status, "状态未知")
+
+    @classmethod
+    def _task_label(cls, record: dict) -> str:
+        title = record.get("title") or record.get("name") or ""
+        episode = cls._episode_label(record)
+        if episode and episode != "-":
+            title = f"{title} {episode}".strip()
+        return title[:60]
+
+    @staticmethod
+    def _save_taskmap(ctx: Context, flow_key: str, pairs: list[dict]) -> None:
+        """按块写入 任务 ref → 片名 映射，供等待期间查询进度用。
+
+        必须在 tasks.wait 之前调用：登记等待后再调 SDK 会收到 FLOW_WAITING。
+        """
+        if not pairs:
+            return
+        operations = []
+        for start in range(0, len(pairs), TASKMAP_CHUNK):
+            operations.append({
+                "operation": "set",
+                "key": f"runs/{flow_key}/taskmap/{start // TASKMAP_CHUNK:04d}",
+                "value": pairs[start:start + TASKMAP_CHUNK],
+            })
+        ctx.mt.storage.batch(operations=operations)
+
+    @staticmethod
+    def _load_taskmap(ctx: Context, flow_key: str) -> list[dict]:
+        pairs: list[dict] = []
+        for index in range(200):  # 上限一万条，实际单轮 400
+            entry = ctx.mt.storage.get(key=f"runs/{flow_key}/taskmap/{index:04d}")
+            if not entry.get("found"):
+                break
+            value = entry.get("value")
+            if not isinstance(value, list):
+                break
+            pairs.extend(item for item in value if isinstance(item, dict))
+        return pairs
+
+    @staticmethod
+    def _task_statuses(ctx: Context, refs: set[str]) -> dict[str, str]:
+        """分页扫 tasks.list，只留下本次提交的任务状态。"""
+        found: dict[str, str] = {}
+        cursor = ""
+        for _ in range(20):
+            page = ctx.mt.tasks.list(cursor=cursor, limit=100)
+            for item in page.get("items", []):
+                ref = item.get("ref")
+                if ref in refs:
+                    found[ref] = item.get("status") or ""
+            cursor = page.get("nextCursor") or ""
+            if not cursor or len(found) >= len(refs):
+                break
+        return found
 
     @staticmethod
     def _episode_label(record: dict) -> str:

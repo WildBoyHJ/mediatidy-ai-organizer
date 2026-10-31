@@ -91,6 +91,21 @@ AI 识别整理 · 直接整理｜成功 7，未处理 3
 - **文件名超长会截断**加省略号，不会把进度条撑坏。
 - **进度上报失败不影响整理**：宿主进度条出错只记一条日志，主流程照常跑完。
 
+## 整理进度
+
+提交整理任务后，插件这一轮就结束了，整理由 MT 自己执行。为了不让你只看到一句「已提交 385 个」，「整理进度」卡片会汇总每个任务的状态：
+
+```
+整理中 120/385 · 正在整理 人生切割术 S02E03
+已完成 120 · 失败 0 · 剩余 265（进行中 1 / 排队 264）
+```
+
+卡片里还有一张小表，列出正在整理和失败的作品。数据来自宿主任务状态，**点「刷新整理进度」更新**（宿主只在整轮结束后才自动刷新查询）。
+
+实现上有个约束值得记：整理任务由宿主执行，插件在等待期间不在线（`tasks.wait` 之后调用任何 SDK 都会收到 `FLOW_WAITING`），所以插件不能自己推送进度。提交前把「任务 ref → 片名」映射按 50 条一块写进 storage，查询时再读回来配上 `tasks.list` 的状态汇总 —— 这是唯一可行的路径。
+
+> 已知限制：状态里没有「单条任务的百分比」，MT 的整理任务是逐个执行的，所以「正在整理」是当前正在跑的那一部；如果整条队列都在排队，会显示「排队 N」。
+
 ## 结果状态
 
 | 状态 | 含义 |
@@ -143,7 +158,7 @@ uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<�
 全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
 
 ```bash
-for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress; do
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize; do
   .venv/bin/python tests/$t.py
 done
 .venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查
@@ -160,6 +175,7 @@ done
 | `test_ai_output.py` | `mediaType=unknown` 反查、有 ID 无季集、目录标注 ID、唯一候选兜底 |
 | `test_notify.py` | 成功/失败通知、开关、通道回退、通知故障不影响整理 |
 | `test_progress.py` | 阶段顺序、文件名进 label、completed 单调不减、上报失败不影响主流程、页面绑定 |
+| `test_organize.py` | 任务映射落盘、整理状态汇总、当前整理项、失败计数、草稿模式无任务、页面声明 |
 | `doctor.py` | 清单静态检查、UI 组件属性白名单、invoke 必填字段、续接参数 |
 
 `doctor.py` 里两条检查是从真实故障里长出来的：

@@ -125,8 +125,11 @@ def test_page_and_query():
     ctx = ctx_for(host, FILES)
     page = handlers_page(plugin, ctx)
     assert page["version"] == "2"
-    assert page["queries"] == [{"id": "results", "name": "results",
-                                "input": {"cursor": {"$ref": "state.cursor"}}}]
+    assert page["queries"] == [
+        {"id": "results", "name": "results",
+         "input": {"cursor": {"$ref": "state.cursor"}}},
+        {"id": "organize", "name": "organize", "input": {}},
+    ]
     assert "cursor" in page["state"]
     blob_early = json.dumps(page, ensure_ascii=False)
     # 早期宿主会拒绝的属性不能出现在页面里
