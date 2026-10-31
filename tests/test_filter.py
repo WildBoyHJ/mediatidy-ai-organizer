@@ -102,6 +102,15 @@ def test_filter_paging():
     print("  筛选分页 25 条：首页 20 + 次页 5 ✓")
 
 
+def test_paging_limit_within_host_cap():
+    """筛选分页的 limit 不能超过宿主上限 100，否则报「存储分页参数无效」。"""
+    host, plugin, handlers, ctx = seed(["failed"] * 30)
+    ask(handlers, ctx, "failed")
+    assert host.list_limits, "应当调用过 storage.list"
+    assert max(host.list_limits) <= 100, host.list_limits
+    print("  分页 limit 上限:", max(host.list_limits))
+
+
 def test_page_has_filter_control():
     host, plugin, handlers, ctx = seed(["matched"])
     token = current.set(ctx)
@@ -121,6 +130,7 @@ def test_page_has_filter_control():
 if __name__ == "__main__":
     for function in (test_all_returns_everything, test_filter_by_status,
                      test_empty_filter_result, test_invalid_filter_falls_back,
-                     test_filter_paging, test_page_has_filter_control):
+                     test_filter_paging, test_paging_limit_within_host_cap,
+                     test_page_has_filter_control):
         function()
     print("\n状态筛选用例全部通过")

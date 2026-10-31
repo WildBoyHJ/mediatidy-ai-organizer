@@ -1248,7 +1248,8 @@ class Plugin(BasePlugin):
             page = ctx.mt.storage.list(
                 prefix=prefix,
                 cursor="" if status_filter != "all" else cursor,
-                limit=200 if status_filter != "all" else 20,
+                # 宿主分页上限是 100，超过会报「存储分页参数无效」
+                limit=100 if status_filter != "all" else 20,
                 values=True)
             batch = page.get("items", [])
             following = page.get("nextCursor") or ""

@@ -37,6 +37,7 @@ class FakeHost:
         self.fail_cancel = False
         self.extra_tasks: list[dict] = []
         self.moved: list[dict] = []
+        self.list_limits: list[int] = []
         self.fail_move = False
 
     def call(self, invocation, name, value):
@@ -164,6 +165,8 @@ class FakeHost:
         return out
 
     def m_storage_list(self, value):
+        # 宿主分页上限 100，超出会报「存储分页参数无效」；记录下来供用例断言
+        self.list_limits.append(int(value.get("limit") or 0))
         prefix = value.get("prefix", "")
         keys = sorted(k for k in self.kv if k.startswith(prefix))
         items = [{"key": k, **self.kv[k]} for k in keys]
