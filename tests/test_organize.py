@@ -38,17 +38,18 @@ def query_organize(plugin, handlers, ctx) -> dict:
         current.reset(token)
 
 
-def test_taskmap_saved_before_wait():
+def test_mapping_from_persisted_items():
+    """映射直接取自落盘的识别结果里的 taskRef，不额外存一份。"""
     host, plugin, handlers, ctx = run(DIRECT)
-    keys = [k for k in host.kv if "/taskmap/" in k]
-    assert keys, f"提交整理后必须落盘任务映射：{list(host.kv)}"
-    pairs = []
-    for key in sorted(keys):
-        pairs.extend(host.kv[key]["value"])
-    assert len(pairs) == len(host.queued) == 3, (len(pairs), len(host.queued))
-    assert {p["ref"] for p in pairs} == {f"task-{i + 1}" for i in range(3)}
-    assert all(p["label"] for p in pairs), pairs
-    print("  映射条数:", len(pairs), "| 示例:", pairs[0]["label"])
+    assert not [k for k in host.kv if "/taskmap/" in k], "不应再单独存 taskmap"
+    records = [v["value"] for k, v in host.kv.items() if "/items/" in k]
+    with_task = [r for r in records if r.get("taskRef")]
+    assert len(with_task) == len(host.queued) == 3, (len(with_task), len(host.queued))
+    assert {r["taskRef"] for r in with_task} == {f"task-{i + 1}" for i in range(3)}
+    data = query_organize(plugin, handlers, ctx)
+    assert data["total"] == 3, data
+    assert all(item["label"] for item in data["items"]), data["items"]
+    print("  映射来自 items 落盘 | 条数:", data["total"], "| 示例:", with_task[0]["title"])
 
 
 def test_progress_while_running():
@@ -134,7 +135,7 @@ def test_page_declares_organize_card():
 
 
 if __name__ == "__main__":
-    for function in (test_taskmap_saved_before_wait, test_progress_while_running,
+    for function in (test_mapping_from_persisted_items, test_progress_while_running,
                      test_progress_all_done, test_progress_counts_failures,
                      test_unknown_status_does_not_crash, test_draft_mode_has_no_tasks,
                      test_no_run_yet, test_page_declares_organize_card):

@@ -28,8 +28,6 @@ AI_CHAT_LIMIT = 78
 # 留出余量，默认每轮最多处理这么多文件。
 SAFE_FILES = 400
 TMDB_SEARCH_LIMIT = 500
-# 整理任务映射每次写 50 条，400 个文件只需 8 次 storage 写入
-TASKMAP_CHUNK = 50
 
 
 def _now() -> str:
@@ -923,7 +921,6 @@ class Plugin(BasePlugin):
 
     def _submit_direct(self, ctx: Context, flow_key: str, ready: list[dict], profile_id: int) -> list[str]:
         refs: list[str] = []
-        pairs: list[dict] = []
         total = len(ready)
         for index, record in enumerate(ready):
             ctx.mt.runtime.checkpoint()
@@ -950,9 +947,6 @@ class Plugin(BasePlugin):
             record["taskStatus"] = task.get("status", "queued")
             record["reason"] = "已入队"
             refs.append(task["ref"])
-            pairs.append({"ref": task["ref"], "label": self._task_label(record)})
-        # 映射必须在 tasks.wait 之前写入：登记等待后再调 SDK 会收到 FLOW_WAITING
-        self._save_taskmap(ctx, flow_key, pairs)
         self._patch_flow(ctx, flow_key, {"taskRefs": refs, "organizeParent": ctx.run_id,
                                          "stage": "organize"})
         self._persist(ctx, flow_key, ready)
@@ -1117,34 +1111,26 @@ class Plugin(BasePlugin):
             title = f"{title} {episode}".strip()
         return title[:60]
 
-    @staticmethod
-    def _save_taskmap(ctx: Context, flow_key: str, pairs: list[dict]) -> None:
-        """按块写入 任务 ref → 片名 映射，供等待期间查询进度用。
+    @classmethod
+    def _load_taskmap(cls, ctx: Context, flow_key: str) -> list[dict]:
+        """从已落盘的识别结果里取出 任务 ref → 片名 映射。
 
-        必须在 tasks.wait 之前调用：登记等待后再调 SDK 会收到 FLOW_WAITING。
+        识别结果每轮都会 _persist，提交整理后每条记录带 taskRef，
+        所以不必另存一份映射 —— 也让升级前提交的旧运行照样能查到进度。
         """
-        if not pairs:
-            return
-        operations = []
-        for start in range(0, len(pairs), TASKMAP_CHUNK):
-            operations.append({
-                "operation": "set",
-                "key": f"runs/{flow_key}/taskmap/{start // TASKMAP_CHUNK:04d}",
-                "value": pairs[start:start + TASKMAP_CHUNK],
-            })
-        ctx.mt.storage.batch(operations=operations)
-
-    @staticmethod
-    def _load_taskmap(ctx: Context, flow_key: str) -> list[dict]:
+        prefix = f"runs/{flow_key}/items/"
         pairs: list[dict] = []
-        for index in range(200):  # 上限一万条，实际单轮 400
-            entry = ctx.mt.storage.get(key=f"runs/{flow_key}/taskmap/{index:04d}")
-            if not entry.get("found"):
+        cursor = ""
+        for _ in range(10):  # 单轮上限 400，100/页 → 最多 4 页
+            page = ctx.mt.storage.list(prefix=prefix, cursor=cursor, limit=100, values=True)
+            for entry in page.get("items", []):
+                record = entry.get("value") or {}
+                ref = record.get("taskRef")
+                if ref:
+                    pairs.append({"ref": ref, "label": cls._task_label(record)})
+            cursor = page.get("nextCursor") or ""
+            if not cursor:
                 break
-            value = entry.get("value")
-            if not isinstance(value, list):
-                break
-            pairs.extend(item for item in value if isinstance(item, dict))
         return pairs
 
     @staticmethod
