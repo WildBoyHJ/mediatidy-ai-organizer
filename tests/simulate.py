@@ -33,6 +33,8 @@ class FakeHost:
         self.waiting: list[str] = []
         self.progress: list[dict] = []
         self.task_status: dict[str, str] = {}
+        self.cancelled: list[str] = []
+        self.fail_cancel = False
 
     def call(self, invocation, name, value):
         self.calls.append((name, value))
@@ -123,6 +125,15 @@ class FakeHost:
                           "total": 1, "completed": 1 if status == "done" else 0,
                           "failed": 1 if status == "failed" else 0, "updatedAt": ""})
         return {"items": items, "nextCursor": ""}
+
+    def m_tasks_cancel(self, value):
+        ref = value["ref"]
+        if self.fail_cancel:
+            from mt_plugin import SDKError
+            raise SDKError("取消失败", "CANCEL_BOOM")
+        self.cancelled.append(ref)
+        self.task_status[ref] = "cancelled"
+        return True
 
     def m_storage_set(self, value):
         self.kv[value["key"]] = {"found": True, "value": value["value"], "revision": "1", "bytes": 0}

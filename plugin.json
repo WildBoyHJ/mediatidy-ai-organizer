@@ -1,7 +1,7 @@
 {
   "id": "ai.tmdb-organizer",
   "name": "AI 识别整理",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "sdkVersion": "2",
   "author": "Minis",
   "description": "用 AI 识别文件名，到 TMDB 核对作品身份，再按整理方案改名归档。支持草稿审阅与直接整理两种模式；AI 不可用时退回本地文件名解析。",
@@ -16,6 +16,7 @@
     "organize.read",
     "organize.submit",
     "storage",
+    "tasks.cancel",
     "tasks.read",
     "tasks.wait",
     "tmdb.read"
@@ -189,6 +190,32 @@
         ]
       },
       "outputSchema": {}
+    },
+    {
+      "id": "cancel-task",
+      "label": "取消单个整理任务",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ref": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ref"
+        ]
+      },
+      "outputSchema": {}
+    },
+    {
+      "id": "cancel-all",
+      "label": "取消全部未完成的整理任务",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "outputSchema": {}
     }
   ],
   "queries": [
@@ -213,6 +240,21 @@
       "inputSchema": {
         "type": "object",
         "properties": {},
+        "required": []
+      },
+      "outputSchema": {}
+    },
+    {
+      "id": "tasks",
+      "label": "任务列表",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 32
+          }
+        },
         "required": []
       },
       "outputSchema": {}

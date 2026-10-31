@@ -28,6 +28,12 @@ AI_CHAT_LIMIT = 78
 # 留出余量，默认每轮最多处理这么多文件。
 SAFE_FILES = 400
 TMDB_SEARCH_LIMIT = 500
+# 任务状态的归类：终态失败 / 仍可取消
+CANCEL_SETTLED = ("failed", "cancelled", "interrupted", "outcome_unknown")
+CANCELABLE = ("submitting", "queued", "running", "waiting")
+# tasks.cancel 单次调用上限
+CANCEL_LIMIT = 500
+TASK_PAGE_SIZE = 20
 
 
 def _now() -> str:
@@ -148,6 +154,55 @@ class Plugin(BasePlugin):
                 ),
             ),
             ui.Card(
+                ui.Text(text=ui.ref("query.tasks.data.message"), size="sm"),
+                ui.Table(
+                    source=ui.ref("query.tasks.data.items"),
+                    rowKey="ref",
+                    pageSize=20,
+                    columns=[
+                        {"label": "作品", "field": "label", "cells": []},
+                        {"label": "状态", "field": "statusLabel", "cells": []},
+                        {"label": "操作", "cells": [ui.Button(
+                            label="取消",
+                            variant="outline",
+                            onClick=[{"type": "invoke", "actionId": "cancel-task",
+                                      "input": {"ref": ui.ref("row.ref")}},
+                                     {"type": "query", "queryId": "tasks"},
+                                     {"type": "query", "queryId": "organize"}],
+                        )]},
+                    ],
+                ),
+                ui.Stack(
+                    ui.Button(label="刷新任务列表", variant="outline", onClick=[
+                        {"type": "set", "path": "state.tasksCursor", "value": ""},
+                        {"type": "query", "queryId": "tasks"},
+                        {"type": "query", "queryId": "organize"},
+                    ]),
+                    ui.Button(
+                        label="下一页",
+                        variant="outline",
+                        disabled=ui.expr("not", ui.ref("query.tasks.data.nextCursor")),
+                        onClick=[{"type": "set", "path": "state.tasksCursor",
+                                  "value": ui.ref("query.tasks.data.nextCursor")}],
+                    ),
+                    ui.Button(label="取消全部未完成任务", variant="destructive", onClick=[
+                        {"type": "invoke", "actionId": "cancel-all", "input": {}},
+                    ]),
+                    direction="row", gap="sm",
+                ),
+                ui.Text(
+                    text="取消不可撤销：已完成的任务不受影响，排队与执行中的会立即终止。",
+                    tone="warning",
+                    size="sm",
+                ),
+                title="任务列表",
+                visible=ui.expr(
+                    "gt",
+                    ui.expr("coalesce", ui.ref("query.tasks.data.total"), 0),
+                    0,
+                ),
+            ),
+            ui.Card(
                 ui.Table(
                     source=ui.ref("query.results.data.items"),
                     rowKey="id",
@@ -178,9 +233,11 @@ class Plugin(BasePlugin):
                 title="识别结果",
             ),
             ui.Card(ui.RunHistory(), title="运行记录"),
-            state={"cursor": "", "mode": "draft"},
+            state={"cursor": "", "mode": "draft", "tasksCursor": ""},
             queries=[{"id": "results", "name": "results", "input": {"cursor": ui.ref("state.cursor")}},
-                     {"id": "organize", "name": "organize", "input": {}}],
+                     {"id": "organize", "name": "organize", "input": {}},
+                     {"id": "tasks", "name": "tasks",
+                      "input": {"cursor": ui.ref("state.tasksCursor")}}],
         )
 
     # ---------------------------------------------------------------- 入口动作
@@ -1030,6 +1087,92 @@ class Plugin(BasePlugin):
         return {"items": items, "nextCursor": page.get("nextCursor", ""), "message": message,
                 "status": summary.get("status", "")}
 
+    @query("tasks")
+    def tasks(self, input: dict, ctx: Context) -> dict:
+        """整理任务列表，支持分页；每行带状态，供页面逐个取消。"""
+        try:
+            offset = max(0, int(str(input.get("cursor") or "0")))
+        except (TypeError, ValueError):
+            offset = 0
+        rows = self._task_rows(ctx, self._current_flow(ctx))
+        if not rows:
+            return {"items": [], "nextCursor": "", "total": 0, "cancellable": 0,
+                    "message": "本轮没有整理任务"}
+        page = rows[offset:offset + TASK_PAGE_SIZE]
+        following = offset + TASK_PAGE_SIZE
+        cancelled = sum(1 for row in rows if row["status"] in CANCEL_SETTLED)
+        done = sum(1 for row in rows if row["status"] == "done")
+        cancellable = sum(1 for row in rows if row["cancellable"])
+        return {
+            "items": [{"ref": row["ref"], "label": row["label"],
+                       "statusLabel": row["statusLabel"]} for row in page],
+            "nextCursor": str(following) if following < len(rows) else "",
+            "total": len(rows),
+            "cancellable": cancellable,
+            "message": f"共 {len(rows)} 个整理任务：完成 {done}，已取消/失败 {cancelled}，"
+                       f"可取消 {cancellable}",
+        }
+
+    @action("cancel-task")
+    def cancel_task(self, input: dict, ctx: Context) -> dict:
+        ref = str(input.get("ref") or "").strip()
+        if not ref:
+            raise SDKError("缺少任务 ref", "NO_TASK_REF")
+        flow_key = self._current_flow(ctx)
+        known = {pair["ref"] for pair in self._load_taskmap(ctx, flow_key)} if flow_key else set()
+        if ref not in known:
+            raise SDKError("该任务不属于当前这一轮，不能从这里取消", "TASK_NOT_IN_FLOW")
+        try:
+            ok = ctx.mt.tasks.cancel(ref=ref)
+        except SDKError as error:
+            ctx.mt.log(level="error", message=f"取消任务失败：{error.code} {error}")
+            raise
+        ctx.mt.log(level="info", message=f"{'已取消' if ok else '未能取消'}整理任务 {ref}")
+        return {"ref": ref, "cancelled": bool(ok)}
+
+    @action("cancel-all")
+    def cancel_all(self, input: dict, ctx: Context) -> dict:
+        rows = self._task_rows(ctx, self._current_flow(ctx))
+        targets = [row for row in rows if row["cancellable"]][:CANCEL_LIMIT]
+        cancelled = failed = 0
+        for row in targets:
+            try:
+                if ctx.mt.tasks.cancel(ref=row["ref"]):
+                    cancelled += 1
+                else:
+                    failed += 1
+            except SDKError as error:
+                failed += 1
+                ctx.mt.log(level="warn", message=f"取消 {row['label'] or row['ref']} 失败：{error.code}")
+        ctx.mt.log(level="info",
+                   message=f"取消全部：尝试 {len(targets)}，成功 {cancelled}，失败 {failed}")
+        return {"total": len(rows), "attempted": len(targets),
+                "cancelled": cancelled, "failed": failed}
+
+    def _task_rows(self, ctx: Context, flow_key: str) -> list[dict]:
+        if not flow_key:
+            return []
+        pairs = self._load_taskmap(ctx, flow_key)
+        if not pairs:
+            return []
+        statuses = self._task_statuses(ctx, {pair["ref"] for pair in pairs})
+        rows = []
+        for pair in pairs:
+            status = statuses.get(pair["ref"], "")
+            rows.append({
+                "ref": pair["ref"],
+                "label": pair["label"],
+                "status": status,
+                "statusLabel": self._task_status_label(status),
+                "cancellable": status in CANCELABLE,
+            })
+        return rows
+
+    @staticmethod
+    def _current_flow(ctx: Context) -> str:
+        entry = ctx.mt.storage.get(key="currentRun")
+        return entry["value"] if entry["found"] else ""
+
     @query("organize")
     def organize(self, input: dict, ctx: Context) -> dict:
         """整理阶段的实时进度。
@@ -1041,38 +1184,34 @@ class Plugin(BasePlugin):
         empty = {"total": 0, "done": 0, "failed": 0, "remaining": 0, "running": 0,
                  "pending": 0, "message": "尚未提交整理任务", "current": "",
                  "hint": "", "items": []}
-        current = ctx.mt.storage.get(key="currentRun")
-        if not current["found"]:
+        if not self._current_flow(ctx):
             return empty
-        flow_key = current["value"]
-        pairs = self._load_taskmap(ctx, flow_key)
-        if not pairs:
+        rows = self._task_rows(ctx, self._current_flow(ctx))
+        if not rows:
             return {**empty, "message": "本轮没有整理任务（草稿模式，或没有可整理的文件）"}
 
-        labels = {pair.get("ref", ""): pair.get("label", "") for pair in pairs}
-        statuses = self._task_statuses(ctx, set(labels))
         done = failed = running = pending = 0
         current_label = ""
         active: list[dict] = []
         broken: list[dict] = []
-        for ref, label in labels.items():
-            status = statuses.get(ref, "")
-            row = {"ref": ref, "label": label, "statusLabel": self._task_status_label(status)}
+        for row in rows:
+            status = row["status"]
+            entry = {"ref": row["ref"], "label": row["label"], "statusLabel": row["statusLabel"]}
             if status == "done":
                 done += 1
-            elif status in ("failed", "cancelled", "interrupted", "outcome_unknown"):
+            elif status in CANCEL_SETTLED:
                 failed += 1
-                broken.append(row)
+                broken.append(entry)
             elif status == "running":
                 running += 1
-                active.append(row)
+                active.append(entry)
                 if not current_label:
-                    current_label = label
+                    current_label = row["label"]
             else:
                 pending += 1
-                active.append(row)
+                active.append(entry)
 
-        total = len(labels)
+        total = len(rows)
         remaining = total - done - failed
         if not current_label and active:
             current_label = active[0]["label"]

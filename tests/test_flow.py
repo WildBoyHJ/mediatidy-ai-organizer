@@ -129,6 +129,8 @@ def test_page_and_query():
         {"id": "results", "name": "results",
          "input": {"cursor": {"$ref": "state.cursor"}}},
         {"id": "organize", "name": "organize", "input": {}},
+        {"id": "tasks", "name": "tasks",
+         "input": {"cursor": {"$ref": "state.tasksCursor"}}},
     ]
     assert "cursor" in page["state"]
     blob_early = json.dumps(page, ensure_ascii=False)

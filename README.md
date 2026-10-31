@@ -106,6 +106,31 @@ AI 识别整理 · 直接整理｜成功 7，未处理 3
 
 > 已知限制：状态里没有「单条任务的百分比」，MT 的整理任务是逐个执行的，所以「正在整理」是当前正在跑的那一部；如果整条队列都在排队，会显示「排队 N」。
 
+## 任务列表与取消
+
+「任务列表」卡片列出本轮所有整理任务，按提交顺序分页（每页 20 条），每行可以单独取消：
+
+```
+共 385 个整理任务：完成 120，已取消/失败 0，可取消 265
+
+作品                  状态      操作
+人生切割术 S02E03      正在整理   [取消]
+沙丘2                  排队中     [取消]
+```
+
+- **取消单个**：点该行的「取消」，只终止那一个任务
+- **取消全部**：点「取消全部未完成任务」，批量终止所有 `排队 / 执行中 / 等待中` 的任务
+- **已完成的不受影响**：`已完成 / 失败 / 已取消` 不会进入取消范围，按钮点了也不会动它们
+
+⚠️ **取消不可撤销**。已提交到 MT 的业务任务被取消后无法恢复，需要重新识别并提交。
+
+相关约束：
+
+- 需要 `tasks.cancel` 权限（0.10.0 新增），升级后在「设置与授权」里勾上
+- 只能取消**当前这一轮**的任务，别轮的 ref 会被拒绝（`TASK_NOT_IN_FLOW`）
+- 单次最多取消 500 个（宿主 `tasks.cancel` 调用上限），单轮上限 400 所以够用
+- 取消后列表不会立刻变，点「刷新任务列表」更新
+
 ## 结果状态
 
 | 状态 | 含义 |
@@ -158,7 +183,7 @@ uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<�
 全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
 
 ```bash
-for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize; do
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks; do
   .venv/bin/python tests/$t.py
 done
 .venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查
@@ -176,6 +201,7 @@ done
 | `test_notify.py` | 成功/失败通知、开关、通道回退、通知故障不影响整理 |
 | `test_progress.py` | 阶段顺序、文件名进 label、completed 单调不减、上报失败不影响主流程、页面绑定 |
 | `test_organize.py` | 任务映射落盘、整理状态汇总、当前整理项、失败计数、草稿模式无任务、页面声明 |
+| `test_tasks.py` | 任务列表分页、单条取消、取消全部跳过已完成、越界 ref 拒绝、取消失败不抛错 |
 | `doctor.py` | 清单静态检查、UI 组件属性白名单、invoke 必填字段、续接参数 |
 
 `doctor.py` 里两条检查是从真实故障里长出来的：
