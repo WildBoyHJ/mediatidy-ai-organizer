@@ -43,9 +43,16 @@ AI 不可用（没配置服务商、没授权、宿主关了联网）时退回�
 
 ## 需要的授权
 
-`ai.chat`、`ai.web.search`、`tmdb.read`、`organize.read`、`organize.prepare`、`organize.submit`、`organize.manual.run`、`files.read`、`tasks.read`、`tasks.wait`、`storage`。
+`ai.chat`、`ai.web.search`、`tmdb.read`、`organize.read`、`organize.prepare`、`organize.submit`、`organize.manual.run`、`files.read`、`tasks.read`、`tasks.wait`、`tasks.cancel`、`storage`、`files.write`。
 
 安装后要在宿主的「设置与授权」里逐项授予；插件更新不会自动继承新权限。
+
+### 关于 `files.write`
+
+插件本身**不直接写文件**，整理动作始终由宿主按方案执行。声明 `files.write` 是为了让授权页出现「写入」勾选框 —— 某些版本的 MT 在受理整理请求时会检查「目标目录对调用方是否可写」，缺这一项会返回
+`NO_DESTINATION: 整理方案的目标目录没有写入授权`。
+
+所以安装后请给**整理方案的目标目录**（例如 `/media/library` 这类）勾上写入权限；源目录保持只读即可。
 
 ## 通知
 

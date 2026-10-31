@@ -1,7 +1,7 @@
 {
   "id": "ai.tmdb-organizer",
   "name": "AI 识别整理",
-  "version": "0.10.4",
+  "version": "0.10.5",
   "sdkVersion": "2",
   "author": "Minis",
   "description": "用 AI 识别文件名，到 TMDB 核对作品身份，再按整理方案改名归档。支持草稿审阅与直接整理两种模式；AI 不可用时退回本地文件名解析。",
@@ -10,6 +10,7 @@
     "ai.chat",
     "ai.web.search",
     "files.read",
+    "files.write",
     "notification.send",
     "organize.manual.run",
     "organize.prepare",
