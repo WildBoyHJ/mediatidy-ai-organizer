@@ -192,7 +192,9 @@ def test_page_has_steps_bar():
     assert '"Steps"' in blob, "流程卡要有步骤条"
     assert "query.progress.data.stepLabels" in blob
     assert "query.progress.data.stepIndex" in blob
-    print("  步骤条已绑定")
+    assert '"default"' in blob, "刷新按钮要显眼（default 实心）"
+    assert "宿主不提供定时刷新" in blob, "要有常驻的刷新说明"
+    print("  步骤条已绑定，刷新按钮为主按钮，说明常驻")
 
 
 if __name__ == "__main__":

@@ -156,7 +156,7 @@ class Plugin(BasePlugin):
                     ],
                 ),
                 ui.Stack(
-                    ui.Button(label="刷新进度", variant="outline", onClick=[
+                    ui.Button(label="刷新进度", variant="default", onClick=[
                         {"type": "query", "queryId": "progress"},
                         {"type": "query", "queryId": "tasks"},
                         {"type": "query", "queryId": "results"},
@@ -164,13 +164,12 @@ class Plugin(BasePlugin):
                     direction="row", gap="sm",
                 ),
                 ui.Text(
-                    text=ui.expr(
-                        "if",
-                        running,
-                        "扫描与 MT 整理两行的进度是现查任务状态得到的；宿主只在整轮结束后自动刷新，"
-                        "运行中点「刷新进度」更新。",
-                        ui.ref("query.results.data.message"),
-                    ),
+                    text="宿主不提供定时刷新：运行中请点「刷新进度」；整轮结束后会自动刷新一次。",
+                    tone="muted",
+                    size="sm",
+                ),
+                ui.Text(
+                    text=ui.expr("if", running, "", ui.ref("query.results.data.message")),
                     tone="muted",
                     size="sm",
                 ),
