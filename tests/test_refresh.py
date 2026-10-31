@@ -92,15 +92,29 @@ def test_progress_marks_active_while_running():
     print("  active 随 summary 状态切换 ✓")
 
 
-def test_page_uses_coalesce_for_progress():
+def test_page_binds_progress_to_query():
+    """进度条只认 storage（query.progress），避免 run.* 残留值把进度条卡住。"""
     host, plugin, handlers = fresh()
     ctx = ctx_for(host, FILES, DIRECT)
     blob = json.dumps(page_of(plugin, ctx), ensure_ascii=False)
-    assert "query.progress.data.completed" in blob, "进度条要有 storage 兜底"
+    assert "query.progress.data.completed" in blob, "进度条要绑 storage 兜底值"
     assert "query.progress.data.message" in blob
-    assert "coalesce" in blob, "run.* 与 query.progress 之间用 coalesce 兜底"
     assert "query.progress.data.active" in blob, "运行中判断要兼顾刷新后的状态"
-    print("  页面兜底绑定齐全 ✓")
+    assert "run.progress.completed" not in blob, "不要再混用 run.*，会被残留值盖住"
+    print("  进度条只绑 query.progress ✓")
+
+
+def test_progress_full_bar_when_organizing():
+    """进入整理阶段后识别已结束，进度条应满格并指向整理进度。"""
+    host, plugin, handlers = fresh()
+    ctx = ctx_for(host, FILES, DIRECT)
+    handlers[("action", "start")]({"profileId": 7, "mode": "direct"}, ctx)
+    data = ask(handlers, "progress", ctx)
+    assert data["status"] in ("waiting", "submitting"), data
+    assert data["completed"] == data["total"] == 3, data
+    assert "识别完成" in data["message"] and "整理进度" in data["message"], data["message"]
+    assert data["active"] is True, data
+    print("  整理阶段:", data["message"])
 
 
 def test_progress_throttled():
@@ -117,6 +131,7 @@ def test_progress_throttled():
 if __name__ == "__main__":
     for function in (test_defaults_before_any_run, test_selection_survives_refresh,
                      test_progress_survives_refresh, test_progress_marks_active_while_running,
-                     test_page_uses_coalesce_for_progress, test_progress_throttled):
+                     test_page_binds_progress_to_query, test_progress_full_bar_when_organizing,
+                     test_progress_throttled):
         function()
     print("\n刷新不丢状态用例全部通过")

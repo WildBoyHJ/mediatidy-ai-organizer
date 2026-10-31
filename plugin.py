@@ -118,24 +118,21 @@ class Plugin(BasePlugin):
             ),
             ui.Card(
                 ui.Progress(
-                    label=ui.expr("coalesce", ui.ref("run.progress.message"),
-                                  ui.ref("query.progress.data.message")),
-                    value=ui.expr("coalesce", ui.ref("run.progress.completed"),
-                                  ui.ref("query.progress.data.completed")),
-                    total=ui.expr("coalesce", ui.ref("run.progress.total"),
-                                  ui.ref("query.progress.data.total")),
+                    label=ui.ref("query.progress.data.message"),
+                    value=ui.ref("query.progress.data.completed"),
+                    total=ui.ref("query.progress.data.total"),
                 ),
                 ui.Text(
                     text=ui.expr(
                         "if",
                         running,
-                        "运行中：进度条上显示当前阶段、已完成数量与正在处理的文件名。",
+                        "识别阶段显示当前环节与正在处理的文件名；整理由 MT 执行，进度见下方「整理进度」。",
                         ui.ref("query.results.data.message"),
                     ),
                     tone="muted",
                     size="sm",
                 ),
-                title=ui.expr("if", running, "进度 · 运行中", "进度"),
+                title=ui.expr("if", running, "进度 · 进行中", "进度"),
             ),
             ui.Card(
                 ui.Progress(
@@ -431,8 +428,10 @@ class Plugin(BasePlugin):
         results: list[dict] = []
         total = len(files)
         self._report(ctx, "准备识别", 0, total, f"共 {total} 个文件")
-        # 标记进行中，供页面刷新后用 progress 查询判断「运行中」
-        self._patch_summary(ctx, flow_key, {"status": "running", "message": "识别中"})
+        # 标记进行中，供页面刷新后用 progress 查询判断「运行中」；顺带记下识别总数
+        self._patch_summary(ctx, flow_key,
+                            {"status": "running", "message": "识别中",
+                             "counts": {"total": total}})
 
         for start in range(0, len(files), batch_size):
             if time.monotonic() > deadline:
@@ -1216,7 +1215,11 @@ class Plugin(BasePlugin):
 
     @query("progress")
     def progress(self, input: dict, ctx: Context) -> dict:
-        """刷新页面后 run.* 可能为空，这里用 storage 兜住最近一次进度。"""
+        """刷新页面后 run.* 可能为空，这里用 storage 兜住最近一次进度。
+
+        进入整理阶段后识别已经结束，进度条不该再假装在动：直接给满格，
+        文案指向下方的整理进度。
+        """
         flow_key = self._current_flow(ctx)
         if not flow_key:
             return {"completed": 0, "total": 0, "message": "", "stage": "",
@@ -1226,13 +1229,24 @@ class Plugin(BasePlugin):
         summary_entry = ctx.mt.storage.get(key=f"runs/{flow_key}/summary")
         summary = summary_entry["value"] if summary_entry["found"] else {}
         status = str(summary.get("status") or "")
+        counts = summary.get("counts") or {}
+        identify_total = int(counts.get("total") or data.get("total") or 0)
+
+        if status in ("waiting", "submitting"):
+            return {"completed": identify_total, "total": identify_total,
+                    "message": "识别完成 · 整理由 MT 执行，进度见下方「整理进度」",
+                    "stage": "organize", "status": status, "active": True}
+        if status == "done":
+            return {"completed": identify_total, "total": identify_total,
+                    "message": "本轮已结束 · 结果见下方识别结果",
+                    "stage": "done", "status": status, "active": False}
         return {
             "completed": int(data.get("completed") or 0),
             "total": int(data.get("total") or 0),
-            "message": str(data.get("message") or summary.get("message") or ""),
+            "message": str(data.get("message") or ""),
             "stage": str(data.get("stage") or ""),
             "status": status,
-            "active": status in ("running", "waiting", "submitting"),
+            "active": status == "running",
         }
 
     @query("organize")
@@ -1279,12 +1293,15 @@ class Plugin(BasePlugin):
         remaining = total - done - failed - cancelled
         if not current_label and active:
             current_label = active[0]["label"]
-        if remaining <= 0:
-            message = f"整理完成 {done}/{total}"
-        elif current_label:
-            message = f"整理中 {done}/{total} · 正在整理 {current_label}"
+        # 进度条自己会显示 done/total，message 只描述状态，避免「完成 0/7 · 0/7」式重复
+        if remaining > 0:
+            message = f"整理中 · 正在整理 {current_label}" if current_label else "整理中 · 等待执行"
+        elif done == total:
+            message = "全部整理完成"
+        elif cancelled == total:
+            message = f"整理任务已全部取消（{cancelled} 个）"
         else:
-            message = f"整理中 {done}/{total} · 剩余 {remaining}"
+            message = f"整理已结束：完成 {done}，{failed + cancelled} 个失败或已取消"
         hint = (f"已完成 {done} · 失败 {failed} · 已取消 {cancelled} · 剩余 {remaining}"
                 f"（进行中 {running} / 排队 {pending}）")
         return {"total": total, "done": done, "failed": failed, "cancelled": cancelled,
@@ -1578,17 +1595,15 @@ class Plugin(BasePlugin):
     def _report(self, ctx: Context, stage: str, done: int, total: int, detail: str = "") -> None:
         """把阶段、进度和当前文件名推给宿主进度条，并落盘一份。
 
-        宿主只给 completed / total / message 三个字段，页面拿
-        run.progress.message 当进度条 label，所以阶段与文件名都拼进 message。
+        宿主进度条自己会显示 completed/total，所以 message 里**不要再写分数**，
+        否则会出现「整理完成 0/7 · 0/7」这种重复。
         同时写一份到 storage：刷新页面后 run.* 可能是空的，页面靠它兜底。
         进度上报失败绝不能影响主流程。
         """
-        text = f"{stage} {int(done)}/{int(total)}"
         clean = (detail or "").strip()
-        if clean:
-            if len(clean) > 56:
-                clean = clean[:54] + "…"
-            text = f"{text} · {clean}"
+        if len(clean) > 56:
+            clean = clean[:54] + "…"
+        text = f"{stage} · {clean}" if clean else stage
         try:
             ctx.mt.runtime.progress(completed=int(done), total=int(total), message=text)
         except SDKError:
@@ -1597,12 +1612,12 @@ class Plugin(BasePlugin):
 
     def _remember_progress(self, ctx: Context, stage: str, done: int,
                            total: int, text: str) -> None:
-        """节流落盘进度：阶段变化或每 20 个文件写一次，避免把 storage 调用打满。"""
+        """节流落盘进度：阶段变化、每 10 个文件或收尾时写一次，避免把 storage 调用打满。"""
         marks = getattr(self, "_progress_marks", None)
         if marks is None:
             marks = self._progress_marks = {}
         mark = marks.get(ctx.flow_id)
-        if mark is not None and mark[0] == stage and done % 20 and done != total:
+        if mark is not None and mark[0] == stage and done % 10 and done != total:
             return
         marks[ctx.flow_id] = (stage, done)
         try:

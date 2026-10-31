@@ -90,16 +90,19 @@ def test_progress_failure_does_not_break_run():
 
 
 def test_page_binds_progress_label():
-    _, _, plugin, ctx = run()
+    host, _, plugin, ctx = run()
     token = current.set(ctx)
     try:
         page = plugin.get_page(ctx)
     finally:
         current.reset(token)
     text = json.dumps(page, ensure_ascii=False)
-    assert "run.progress.completed" in text, "进度条应绑定 completed"
-    assert "run.progress.total" in text, "进度条应绑定 total"
-    assert "run.progress.message" in text, "进度条 label 应绑定 message"
+    assert "query.progress.data.completed" in text, "进度条应绑定 completed"
+    assert "query.progress.data.total" in text, "进度条应绑定 total"
+    assert "query.progress.data.message" in text, "进度条 label 应绑定 message"
+    # 宿主自己会显示 completed/total，message 里不能再写分数，否则文案重复
+    for entry in host.progress:
+        assert "/3" not in entry["message"], f"message 不应带分数：{entry['message']}"
     assert '"Progress"' in text, "页面必须有 Progress 组件"
 
     def walk(node):

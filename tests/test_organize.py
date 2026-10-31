@@ -62,7 +62,7 @@ def test_progress_while_running():
     assert data["remaining"] == 2, data
     assert data["current"], "应给出正在整理的片名"
     assert "正在整理" in data["message"], data["message"]
-    assert data["message"].startswith("整理中 1/3"), data["message"]
+    assert data["message"].startswith("整理中 · 正在整理"), data["message"]
     labels = [item["statusLabel"] for item in data["items"]]
     assert "正在整理" in labels and "排队中" in labels, labels
     print("  message:", data["message"])
@@ -74,7 +74,7 @@ def test_progress_all_done():
         DIRECT, {"task-1": "done", "task-2": "done", "task-3": "done"})
     data = query_organize(plugin, handlers, ctx)
     assert data["done"] == 3 and data["remaining"] == 0, data
-    assert data["message"] == "整理完成 3/3", data["message"]
+    assert data["message"] == "全部整理完成", data["message"]
     print("  message:", data["message"])
 
 
@@ -86,6 +86,17 @@ def test_progress_counts_failures():
     assert data["remaining"] == 0, data
     assert data["items"] == [], f"明细只列进行中的任务：{data['items']}"
     print("  完成", data["done"], "失败", data["failed"], "|", data["hint"])
+
+
+def test_all_cancelled_message():
+    """全部被取消时不能说「整理完成」，文案要如实反映。"""
+    host, plugin, handlers, ctx = run(
+        DIRECT, {"task-1": "cancelled", "task-2": "cancelled", "task-3": "cancelled"})
+    data = query_organize(plugin, handlers, ctx)
+    assert data["cancelled"] == 3 and data["remaining"] == 0, data
+    assert "取消" in data["message"] and "完成" not in data["message"], data["message"]
+    assert data["message"] == "整理任务已全部取消（3 个）", data["message"]
+    print("  全部取消:", data["message"])
 
 
 def test_cancelled_hidden_from_details():
@@ -109,7 +120,7 @@ def test_unknown_status_does_not_crash():
     data = query_organize(plugin, handlers, ctx)
     assert data["total"] == 3, data
     assert data["pending"] == 3, data
-    assert data["message"].startswith("整理中 0/3"), data["message"]
+    assert data["message"].startswith("整理中 ·"), data["message"]
     print("  未知状态归入待处理 ✓ |", data["hint"])
 
 
@@ -150,7 +161,7 @@ def test_page_declares_organize_card():
 if __name__ == "__main__":
     for function in (test_mapping_from_persisted_items, test_progress_while_running,
                      test_progress_all_done, test_progress_counts_failures,
-                     test_cancelled_hidden_from_details,
+                     test_all_cancelled_message, test_cancelled_hidden_from_details,
                      test_unknown_status_does_not_crash, test_draft_mode_has_no_tasks,
                      test_no_run_yet, test_page_declares_organize_card):
         function()
