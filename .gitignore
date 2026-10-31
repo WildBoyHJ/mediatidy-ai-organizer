@@ -22,5 +22,8 @@ venv/
 /tmp/
 *.log
 
+# SDK 契约数据（由 mt_plugin 包提供，不入库）
+ui-registry.json
+
 # 发布包单独保留
 !releases/*.zip

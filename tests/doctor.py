@@ -105,15 +105,45 @@ class ProbeHost:
         return True
 
 
+def resolve_registry() -> tuple[Path | None, list[str]]:
+    """定位 SDK 提供的 ui-registry.json。
+
+    优先级：环境变量 MT_UI_REGISTRY → mt_plugin 包所在目录 → 项目根目录。
+    该文件属于 SDK 契约数据，不应复制进本仓库。
+    """
+    import os
+
+    candidates: list[Path] = []
+    override = os.environ.get("MT_UI_REGISTRY")
+    if override:
+        candidates.append(Path(override))
+    try:
+        import mt_plugin
+
+        candidates.append(Path(mt_plugin.__file__).resolve().parent / "ui-registry.json")
+    except Exception:  # noqa: BLE001
+        pass
+    candidates.append(Path(__file__).resolve().parent.parent / "ui-registry.json")
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate, [str(item) for item in candidates]
+    return None, [str(item) for item in candidates]
+
+
 def check_page(ctx) -> list[str]:
     """逐节点校验页面组件与事件属性，复现宿主的 UI v2 校验。"""
     import json as _json
     from pathlib import Path as _Path
 
     problems: list[str] = []
-    registry_path = _Path(__file__).resolve().parent.parent / "ui-registry.json"
-    if not registry_path.exists():
-        return ["找不到 ui-registry.json，跳过页面属性检查"]
+    registry_path, tried = resolve_registry()
+    if registry_path is None:
+        return [
+            "找不到 ui-registry.json，页面属性校验**未执行**（不能视为通过）。已查找："
+            + "、".join(tried)
+            + "；可用环境变量 MT_UI_REGISTRY 指定"
+        ]
     registry = _json.loads(registry_path.read_text("utf-8"))
     allowed = registry["components"]
     host_actions = set(registry.get("hostActions", []))
@@ -307,6 +337,8 @@ def main() -> None:
         current.reset(token)
 
     print("\n== 页面属性校验（复现宿主 UI v2 校验） ==")
+    registry_path, _ = resolve_registry()
+    print("  注册表:", registry_path if registry_path else "未找到")
     if page is not None:
         ui_problems = check_page({"plugin": plugin, "context": ctx})
         if ui_problems:
@@ -332,9 +364,9 @@ def main() -> None:
     print("\n== 结论 ==")
     if problems:
         print("  先修上面列出的清单问题；页面被拒通常是 ui 组件属性或 schema 写法过新。")
-    else:
-        print("  清单与只读通道没发现问题。若仍然「用不了」，把宿主日志里")
-        print("  「插件加载 / 页面校验 / SDK 失败」三类记录贴出来，那里会有具体字段路径。")
+        raise SystemExit(1)
+    print("  清单与只读通道没发现问题。若仍然「用不了」，把宿主日志里")
+    print("  「插件加载 / 页面校验 / SDK 失败」三类记录贴出来，那里会有具体字段路径。")
 
 
 if __name__ == "__main__":
