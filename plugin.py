@@ -60,20 +60,32 @@ class Plugin(BasePlugin):
         saved = ctx.mt.storage.get(key="settings")
         if not saved["found"]:
             ctx.mt.storage.set(key="settings", value={"schemaVersion": 1})
+        # 进度落盘的节流标记：flow_id -> (阶段, 已完成)
+        self._progress_marks: dict[str, tuple[str, int]] = {}
         ctx.mt.log(level="info", message="AI 识别整理已初始化")
 
     # ---------------------------------------------------------------- 页面
 
     def get_page(self, ctx: Context) -> dict:
-        # 关键：profile 与提交方式必须 bind 到 input 空间（input.profileId / input.mode），
-        # 宿主会在 invoke 时把这些值合并进动作参数。用 state 传值不会进 inputSchema，
-        # 会报「Schema 缺少必填字段 profileId」。
+        # 刷新页面会重置 input / state 两个可写空间，选择项会变空白。
+        # 所以：① 选择项 bind 到 state；② state 默认值从 storage 里上次的选择读回来；
+        # ③ 进度除了 run.* 再兜一层 storage，刷新后仍能看到上一轮的阶段与计数。
+        saved = ctx.mt.storage.get(key="settings")
+        settings = saved["value"] if saved["found"] else {}
+        last_profile = settings.get("lastProfileId")
+        if not isinstance(last_profile, int) or last_profile <= 0:
+            last_profile = None
+        last_mode = settings.get("lastMode")
+        if last_mode not in ("draft", "direct"):
+            last_mode = "draft"
+
         running = ui.expr("or",
                           ui.expr("eq", ui.ref("run.status"), "queued"),
-                          ui.expr("eq", ui.ref("run.status"), "running"))
+                          ui.expr("eq", ui.ref("run.status"), "running"),
+                          ui.ref("query.progress.data.active"))
         ready = ui.expr("and",
                         ui.expr("not", running),
-                        ui.ref("input.profileId"),
+                        ui.ref("state.profileId"),
                         ui.expr("gt", ui.ref("stats.selections"), 0))
         return ui.page(
             ui.Alert(
@@ -82,8 +94,8 @@ class Plugin(BasePlugin):
             ),
             ui.Card(
                 ui.Text(text="1. 选择整理方案与提交方式"),
-                ui.ProfilePicker(label="整理方案", bind="input.profileId"),
-                ui.Select(label="提交方式", bind="input.mode", options=[
+                ui.ProfilePicker(label="整理方案", bind="state.profileId"),
+                ui.Select(label="提交方式", bind="state.mode", options=[
                     {"label": "草稿审阅（推荐）", "value": "draft"},
                     {"label": "直接整理", "value": "direct"},
                 ]),
@@ -91,22 +103,27 @@ class Plugin(BasePlugin):
                 ui.FilePicker(),
                 ui.Button(
                     label="开始识别与整理",
-                    onClick=[{"type": "invoke", "actionId": "start"}],
+                    onClick=[{"type": "invoke", "actionId": "start",
+                              "input": {"profileId": ui.ref("state.profileId"),
+                                        "mode": ui.ref("state.mode")}}],
                     disabled=ui.expr("not", ready),
                 ),
                 ui.Text(text=ui.expr(
                     "if",
                     ui.expr("eq", ui.ref("stats.selections"), 0),
                     "请先选择文件或目录",
-                    ui.expr("if", ui.ref("input.profileId"), "准备就绪，可以开始", "请选择整理方案"),
+                    ui.expr("if", ui.ref("state.profileId"), "准备就绪，可以开始", "请选择整理方案"),
                 ), tone="muted", size="sm"),
                 title="开始",
             ),
             ui.Card(
                 ui.Progress(
-                    label=ui.ref("run.progress.message"),
-                    value=ui.ref("run.progress.completed"),
-                    total=ui.ref("run.progress.total"),
+                    label=ui.expr("coalesce", ui.ref("run.progress.message"),
+                                  ui.ref("query.progress.data.message")),
+                    value=ui.expr("coalesce", ui.ref("run.progress.completed"),
+                                  ui.ref("query.progress.data.completed")),
+                    total=ui.expr("coalesce", ui.ref("run.progress.total"),
+                                  ui.ref("query.progress.data.total")),
                 ),
                 ui.Text(
                     text=ui.expr(
@@ -235,11 +252,13 @@ class Plugin(BasePlugin):
                 title="识别结果",
             ),
             ui.Card(ui.RunHistory(), title="运行记录"),
-            state={"cursor": "", "mode": "draft", "tasksCursor": ""},
+            state={"cursor": "", "mode": last_mode, "profileId": last_profile,
+                   "tasksCursor": ""},
             queries=[{"id": "results", "name": "results", "input": {"cursor": ui.ref("state.cursor")}},
                      {"id": "organize", "name": "organize", "input": {}},
                      {"id": "tasks", "name": "tasks",
-                      "input": {"cursor": ui.ref("state.tasksCursor")}}],
+                      "input": {"cursor": ui.ref("state.tasksCursor")}},
+                     {"id": "progress", "name": "progress", "input": {}}],
         )
 
     # ---------------------------------------------------------------- 入口动作
@@ -272,6 +291,12 @@ class Plugin(BasePlugin):
             "createdAt": _now(),
         })
         ctx.mt.storage.set(key="currentRun", value=flow_key)
+        # 记住这次的选择：刷新页面时 state 会重置，用它把方案与提交方式带回来
+        saved = ctx.mt.storage.get(key="settings")
+        settings = dict(saved["value"]) if saved["found"] else {"schemaVersion": 1}
+        settings["lastProfileId"] = profile_id
+        settings["lastMode"] = mode
+        ctx.mt.storage.set(key="settings", value=settings)
 
         if not dirs:
             return self._pipeline(ctx, flow_key, files, profile_id, mode, options)
@@ -406,6 +431,8 @@ class Plugin(BasePlugin):
         results: list[dict] = []
         total = len(files)
         self._report(ctx, "准备识别", 0, total, f"共 {total} 个文件")
+        # 标记进行中，供页面刷新后用 progress 查询判断「运行中」
+        self._patch_summary(ctx, flow_key, {"status": "running", "message": "识别中"})
 
         for start in range(0, len(files), batch_size):
             if time.monotonic() > deadline:
@@ -459,6 +486,7 @@ class Plugin(BasePlugin):
 
         if mode == "draft":
             drafted = self._submit_drafts(ctx, flow_key, ready, profile_id)
+            self._report(ctx, "草稿已生成", drafted, len(ready), f"{drafted} 条待确认")
             counts = self._counts(results)
             summary["counts"] = counts
             summary["status"] = "done"
@@ -469,6 +497,7 @@ class Plugin(BasePlugin):
             return {"counts": counts, "drafts": drafted, "message": summary["message"]}
 
         refs = self._submit_direct(ctx, flow_key, ready, profile_id)
+        self._report(ctx, "已提交整理", len(refs), len(refs), f"{len(refs)} 个任务已入队")
         counts = self._counts(results)
         summary["counts"] = counts
         if not refs:
@@ -1185,6 +1214,27 @@ class Plugin(BasePlugin):
         entry = ctx.mt.storage.get(key="currentRun")
         return entry["value"] if entry["found"] else ""
 
+    @query("progress")
+    def progress(self, input: dict, ctx: Context) -> dict:
+        """刷新页面后 run.* 可能为空，这里用 storage 兜住最近一次进度。"""
+        flow_key = self._current_flow(ctx)
+        if not flow_key:
+            return {"completed": 0, "total": 0, "message": "", "stage": "",
+                    "status": "", "active": False}
+        entry = ctx.mt.storage.get(key=f"runs/{flow_key}/progress")
+        data = entry["value"] if entry["found"] else {}
+        summary_entry = ctx.mt.storage.get(key=f"runs/{flow_key}/summary")
+        summary = summary_entry["value"] if summary_entry["found"] else {}
+        status = str(summary.get("status") or "")
+        return {
+            "completed": int(data.get("completed") or 0),
+            "total": int(data.get("total") or 0),
+            "message": str(data.get("message") or summary.get("message") or ""),
+            "stage": str(data.get("stage") or ""),
+            "status": status,
+            "active": status in ("running", "waiting", "submitting"),
+        }
+
     @query("organize")
     def organize(self, input: dict, ctx: Context) -> dict:
         """整理阶段的实时进度。
@@ -1525,12 +1575,12 @@ class Plugin(BasePlugin):
 
     # ---------------------------------------------------------------- 进度
 
-    @staticmethod
-    def _report(ctx: Context, stage: str, done: int, total: int, detail: str = "") -> None:
-        """把阶段、进度和当前文件名推给宿主进度条。
+    def _report(self, ctx: Context, stage: str, done: int, total: int, detail: str = "") -> None:
+        """把阶段、进度和当前文件名推给宿主进度条，并落盘一份。
 
         宿主只给 completed / total / message 三个字段，页面拿
         run.progress.message 当进度条 label，所以阶段与文件名都拼进 message。
+        同时写一份到 storage：刷新页面后 run.* 可能是空的，页面靠它兜底。
         进度上报失败绝不能影响主流程。
         """
         text = f"{stage} {int(done)}/{int(total)}"
@@ -1541,6 +1591,24 @@ class Plugin(BasePlugin):
             text = f"{text} · {clean}"
         try:
             ctx.mt.runtime.progress(completed=int(done), total=int(total), message=text)
+        except SDKError:
+            pass
+        self._remember_progress(ctx, stage, int(done), int(total), text)
+
+    def _remember_progress(self, ctx: Context, stage: str, done: int,
+                           total: int, text: str) -> None:
+        """节流落盘进度：阶段变化或每 20 个文件写一次，避免把 storage 调用打满。"""
+        marks = getattr(self, "_progress_marks", None)
+        if marks is None:
+            marks = self._progress_marks = {}
+        mark = marks.get(ctx.flow_id)
+        if mark is not None and mark[0] == stage and done % 20 and done != total:
+            return
+        marks[ctx.flow_id] = (stage, done)
+        try:
+            ctx.mt.storage.set(key=f"runs/{ctx.flow_id}/progress",
+                               value={"completed": done, "total": total,
+                                      "message": text, "stage": stage, "at": _now()})
         except SDKError:
             pass
 

@@ -131,16 +131,20 @@ def test_page_and_query():
         {"id": "organize", "name": "organize", "input": {}},
         {"id": "tasks", "name": "tasks",
          "input": {"cursor": {"$ref": "state.tasksCursor"}}},
+        {"id": "progress", "name": "progress", "input": {}},
     ]
     assert "cursor" in page["state"]
     blob_early = json.dumps(page, ensure_ascii=False)
     # 早期宿主会拒绝的属性不能出现在页面里
     for banned in ("\"loading\"",):
         assert banned not in blob_early, f"页面不应使用 {banned}"
-    # profile 与 mode 必须 bind 到 input 空间，否则 invoke 时 inputSchema 缺必填字段
-    assert "input.profileId" in blob_early, "profileId 必须 bind 到 input.profileId"
-    assert "input.mode" in blob_early, "mode 必须 bind 到 input.mode"
+    # 选择项 bind 到 state（刷新后由 storage 里的上次选择做默认值），
+    # 并通过 invoke.input 显式传给动作，否则 inputSchema 会缺必填字段
+    assert "state.profileId" in blob_early, "profileId 必须 bind 到 state.profileId"
+    assert "state.mode" in blob_early, "mode 必须 bind 到 state.mode"
     assert "ProfilePicker" in blob_early, "应使用 ProfilePicker 选择整理方案"
+    start = [action for action in MANIFEST["actions"] if action["id"] == "start"][0]
+    assert start["inputSchema"]["required"] == ["profileId"]
     # 页面里所有 $ref 必须指向已声明的数据源
     blob = json.dumps(page, ensure_ascii=False)
     assert "query.results.data.items" in blob

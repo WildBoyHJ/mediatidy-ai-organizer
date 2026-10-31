@@ -90,6 +90,9 @@ AI 识别整理 · 直接整理｜成功 7，未处理 3
 - **识别按批推进**：宿主一次 AI 调用处理一批（默认 8 个文件），所以进度条按批前进，label 里会写明「等 N 个」，不会假装逐个文件在动。
 - **文件名超长会截断**加省略号，不会把进度条撑坏。
 - **进度上报失败不影响整理**：宿主进度条出错只记一条日志，主流程照常跑完。
+- **刷新页面不丢状态**：方案的提交方式存在 `settings` 里，刷新后自动带回；进度除了 `run.*` 还会节流落盘一份，刷新后进度条仍能显示上一轮的阶段与计数。
+
+> 为什么要落盘：宿主刷新页面时会重置 `input` / `state`，`run.*` 也可能变空。所以选择项走 `state` + storage 默认值，进度走 `coalesce(run.*, query.progress.*)` 双层兜底。
 
 ## 整理进度
 
@@ -184,7 +187,7 @@ uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<�
 全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
 
 ```bash
-for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks; do
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks test_refresh; do
   .venv/bin/python tests/$t.py
 done
 .venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查
@@ -203,6 +206,7 @@ done
 | `test_progress.py` | 阶段顺序、文件名进 label、completed 单调不减、上报失败不影响主流程、页面绑定 |
 | `test_organize.py` | 任务映射落盘、整理状态汇总、当前整理项、失败计数、草稿模式无任务、页面声明 |
 | `test_tasks.py` | 列表只留待处理、取消后从列表消失、分页、单条取消、取消全部跳过已完成、越界 ref 拒绝、取消失败不抛错 |
+| `test_refresh.py` | 首屏默认值、刷新后选择项带回、进度兜底、active 状态切换、页面 coalesce 绑定、进度落盘节流 |
 | `doctor.py` | 清单静态检查、UI 组件属性白名单、invoke 必填字段、续接参数 |
 
 `doctor.py` 里两条检查是从真实故障里长出来的：
