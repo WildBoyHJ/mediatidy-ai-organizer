@@ -1,0 +1,216 @@
+{
+  "id": "ai.tmdb-organizer",
+  "name": "AI 识别整理",
+  "version": "0.7.0",
+  "sdkVersion": "2",
+  "author": "Minis",
+  "description": "用 AI 识别文件名，到 TMDB 核对作品身份，再按整理方案改名归档。支持草稿审阅与直接整理两种模式；AI 不可用时退回本地文件名解析。",
+  "entry": "plugin.py:Plugin",
+  "permissions": [
+    "ai.chat",
+    "ai.web.search",
+    "files.read",
+    "notification.send",
+    "organize.manual.run",
+    "organize.prepare",
+    "organize.read",
+    "organize.submit",
+    "storage",
+    "tasks.read",
+    "tasks.wait",
+    "tmdb.read"
+  ],
+  "config": [
+    {
+      "key": "mode",
+      "label": "默认提交方式",
+      "type": "text",
+      "default": "draft"
+    },
+    {
+      "key": "batchSize",
+      "label": "每批文件数",
+      "type": "number",
+      "default": 8
+    },
+    {
+      "key": "yearTolerance",
+      "label": "年份容差",
+      "type": "number",
+      "default": 1
+    },
+    {
+      "key": "maxMinutes",
+      "label": "识别时间上限（分钟）",
+      "type": "number",
+      "default": 20
+    },
+    {
+      "key": "nativeSearch",
+      "label": "允许 AI 联网搜索",
+      "type": "boolean",
+      "default": false
+    },
+    {
+      "key": "promptExtra",
+      "label": "补充识别说明",
+      "type": "textarea",
+      "default": ""
+    },
+    {
+      "key": "notifyEnabled",
+      "label": "整理结束后发送通知",
+      "type": "boolean",
+      "default": true
+    },
+    {
+      "key": "notifyChannelId",
+      "label": "通知通道 ID（留空则用第一个已授权通道）",
+      "type": "text",
+      "default": ""
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": [
+          "draft",
+          "direct"
+        ]
+      },
+      "batchSize": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 10
+      },
+      "yearTolerance": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 5
+      },
+      "maxMinutes": {
+        "type": "integer",
+        "minimum": 2,
+        "maximum": 60
+      },
+      "nativeSearch": {
+        "type": "boolean"
+      },
+      "promptExtra": {
+        "type": "string",
+        "maxLength": 2000
+      },
+      "notifyEnabled": {
+        "type": "boolean"
+      },
+      "notifyChannelId": {
+        "type": "string",
+        "maxLength": 120
+      }
+    },
+    "additionalProperties": false
+  },
+  "actions": [
+    {
+      "id": "start",
+      "label": "开始识别与整理",
+      "fields": [
+        {
+          "key": "files",
+          "label": "文件或目录（每轮最多 500 个视频）",
+          "type": "files",
+          "required": true
+        },
+        {
+          "key": "profileId",
+          "label": "整理方案",
+          "type": "profile",
+          "required": true
+        },
+        {
+          "key": "mode",
+          "label": "提交方式",
+          "type": "text"
+        }
+      ],
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "profileId": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "direct"
+            ]
+          }
+        },
+        "required": [
+          "profileId"
+        ]
+      },
+      "outputSchema": {}
+    },
+    {
+      "id": "after-scan",
+      "label": "扫描完成后继续识别",
+      "kind": "continuation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "flowKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "flowKey"
+        ]
+      },
+      "outputSchema": {}
+    },
+    {
+      "id": "collect",
+      "label": "整理任务完成后归档结果",
+      "kind": "continuation",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "flowKey": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "flowKey"
+        ]
+      },
+      "outputSchema": {}
+    }
+  ],
+  "queries": [
+    {
+      "id": "results",
+      "label": "识别与整理结果",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        "required": []
+      },
+      "outputSchema": {}
+    }
+  ],
+  "ui": {
+    "mode": "python",
+    "version": "2"
+  },
+  "triggers": []
+}

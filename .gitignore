@@ -1,0 +1,23 @@
+# 构建产物
+dist/
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+
+# 虚拟环境
+.venv/
+venv/
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 本地测试数据
+/tmp/
+*.log

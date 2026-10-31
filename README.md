@@ -1,0 +1,155 @@
+# AI 识别整理
+
+用 AI 读文件名 → 到 TMDB 核对作品身份 → 交给整理方案改名归档。
+
+MediaTidy（MT）Python SDK v2 插件。识别结果会先过 TMDB 核对，核对不过就不整理。
+
+## 安装
+
+1. 从 [Releases](../../releases) 下载 `ai.tmdb-organizer-*.zip`，或在插件中心填本仓库地址。
+2. MT 插件中心 → 上传 ZIP → 检查后安装。
+3. 「设置与授权」里勾选能力（12 项，见下）、授权源目录、选整理方案、授权通知通道。
+4. 启用插件，进插件页选文件开始。
+
+需要的授权：`ai.chat`、`ai.web.search`、`tmdb.read`、`organize.read`、`organize.prepare`、`organize.submit`、`organize.manual.run`、`files.read`、`tasks.read`、`tasks.wait`、`storage`、`notification.send`。
+
+> 插件不需要 `files.write`：文件移动由宿主按整理方案执行，插件全程只读。
+
+## 它做什么
+
+1. 读取你选的视频文件（或扫描目录），跳过非视频扩展名。
+2. 每批 8 个文件发一次模型请求，让模型直接给出 **TMDB ID**、作品名、原文名、年份、movie/tv、季集。
+3. 插件只做核对，**不替模型挑候选**：`tmdb.detail` 拉回该 ID 的资料，逐条检查 ID/类型一致、名称有交集、年份在容差内；再用 `tmdb.season` 核对季号是否真实存在。任一项不符就拦下，不会照单整理。
+4. 同剧跨批一致性检查：同一部剧出现不同 TMDB ID 或不同季号，整组挂起不整理。已确认的同剧身份会作为上下文喂给下一批。
+5. 提交：
+   - **草稿审阅**（默认）：`organize.manual.prepareBatch` 生成草稿，你在宿主草稿页逐条确认。
+   - **直接整理**：`organize.manual.run` 逐文件入队，等待任务结束后归档结果。
+
+AI 不可用（没配置服务商、没授权、宿主关了联网）时退回本地文件名解析：能解析出作品名，但**不会猜 TMDB ID**，这些文件标为「未识别」而不是硬塞一个 ID。宁可少整理，也不错整理。
+
+## 配置
+
+| 项 | 默认 | 说明 |
+|---|---|---|
+| 整理方案 | 必填（动作表单） | 只接受 `kind=organize` 且已启用、目标目录可写的方案。`type=profile` 只能写在动作 `fields` 里，不能写进 `config` |
+| 提交方式 | 草稿审阅 | 草稿更安全；直接整理不二次确认 |
+| 每批文件数 | 8 | 1–10。`ai.chat` 每运行上限 78 次，批越大越省额度但更易漏项 |
+| 年份容差 | 1 | 0–5 年 |
+| 识别时间上限 | 20 分钟 | 2–60 分钟。到点停止识别，剩余标记失败而不是静默跳过 |
+| 允许 AI 联网搜索 | 关 | 打开后走 `singleRequest + nativeWebSearch`，需要额外授权与宿主 AI 联网开关 |
+| 补充识别说明 | 空 | 追加到提示词，例如「日文原名优先」「动画按季归类」 |
+| 整理结束后发送通知 | 开 | 每轮结束把成功/失败汇总发到通知通道 |
+| 通知通道 ID | 空 | 留空自动用第一个已授权通道（如 Telegram） |
+
+## 需要的授权
+
+`ai.chat`、`ai.web.search`、`tmdb.read`、`organize.read`、`organize.prepare`、`organize.submit`、`organize.manual.run`、`files.read`、`tasks.read`、`tasks.wait`、`storage`。
+
+安装后要在宿主的「设置与授权」里逐项授予；插件更新不会自动继承新权限。
+
+## 通知
+
+每轮结束后发一条汇总到宿主已配置的通知通道（Telegram 等）：
+
+```
+AI 识别整理 · 直接整理｜成功 7，未处理 3
+方案：临时整理
+总计 10 个文件
+✅ 已提交整理：7
+❌ 失败：2
+❔ 未识别：1
+
+需要关注：
+· a.mkv — TMDB 详情读取失败
+· b.mkv — 模型没有给出可靠的 TMDB ID
+```
+
+要点：
+
+- **成功和失败都发**，没有可整理文件时也发，避免"跑完了但没消息"。
+- 只列需要关注的文件（失败 / 身份冲突 / 需人工处理），最多 20 条，其余折叠成计数。
+- 通知失败**绝不影响整理结果**——只写一条 warn 日志。
+- 需要在「设置与授权」里勾选 `notification.send` 能力，并授权至少一个通知通道。
+
+## 结果状态
+
+| 状态 | 含义 |
+|---|---|
+| 已识别 | 模型/本地解析出了作品名，还没核对 |
+| 已核对 | ID、类型、名称、年份都通过，可以整理 |
+| 需人工处理 | 无法自动定季集：有季无集、季号在 TMDB 不存在、多集合集 |
+| 未识别 | 模型没给名字，或 TMDB 搜不到 |
+| 身份冲突 | TMDB 返回的 ID/类型/名称/年份与识别结论不符，或同剧内部不一致 |
+| 已提交 | 草稿已生成 / 任务已入队 |
+| 已完成 | 整理任务成功结束 |
+| 失败 | 提交失败、任务失败或超出时间上限 |
+
+## 三类常见失败怎么处理
+
+| 现象 | 插件行为 |
+|---|---|
+| 同名候选无法裁决 | 模型返回 `tmdbId: null`，插件标「未识别」并保留原因。**不硬选一个**。 |
+| 有季号没集号（`S01.2025.1080p`） | 标「需人工处理」：`匹配到《X》（S01）但无法识别集数`。 |
+| 文件名季号与 TMDB 不符（`S02` 但只有一季） | 标「需人工处理」：`TMDB 未列出第 2 季，已列出：S01`。 |
+| 季列表查询失败或额度用尽 | 跳过季号校验，不误拦；其余核对照常。 |
+
+季号校验只在拿到**非空**季列表时判定。空列表和查询失败一律跳过——不能把「拿不到数据」当成「季不存在」。
+
+## 边界与已知限制
+
+- 每轮最多处理 500 个文件（按宿主 `maxWorkflowFiles` 再收敛），超出部分会截断并记日志。
+- `ai.chat` 每运行最多 78 次。500 个文件按每批 8 个需要 63 次，余量留给重试；把批量调到 10 以上或反复重跑会更快撞上限。
+- 一批只发一次模型请求，启用 `singleRequest` 后不重发、不降级、不换模型。失败的那批文件退回本地解析，不会中断整轮。
+- 模型回答必须是完整 JSON 对象 `{"items":[...]}`；截断的 JSON 不抢救局部结果，也不按数组位置配对文件。
+- **宁可识别不出，也不猜 ID**。模型不确定时返回 `tmdbId: null`，插件标为未识别，不自行搜索替代作品。
+- 通过 TMDB 核对不等于整理成功，宿主仍会检查方案、路径、授权、文件版本与季集。
+- 文件名、目录结构会发给你配置的 AI 服务。插件日志只记批次计数与错误码，不记完整路径。
+
+## 开发
+
+需要 Python 3.12 与 uv 0.6.7。
+
+```bash
+uv sync --python 3.12
+uv pip install --python .venv/bin/python "/path/to/skill/references/sdk[dev]"
+uv run --no-sync python -m mt_plugin check   # 清单、schema、类型、依赖锁
+uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<版本>.zip
+```
+
+`pack` 会重新生成 `uv.lock`；`mt_plugin` 只装在作者环境，不能写进插件依赖。
+
+### 测试
+
+全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
+
+```bash
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify; do
+  .venv/bin/python tests/$t.py
+done
+.venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查
+```
+
+| 用例 | 覆盖 |
+|---|---|
+| `simulate.py` | 草稿/直接整理、AI 兜底、年份冲突、截断回答 |
+| `test_flow.py` | 扫描续接、扫描失败保留部分结果、同剧一致性、页面声明、collect 续接 |
+| `test_accuracy.py` | 错 ID、同名不同年代、类型不符、无 ID 不猜、多集、别名 |
+| `test_realcases.py` | 用户实测的三类报错文件名回归 |
+| `test_profile.py` | 方案不存在/停用/无写权限/destination 缺失 |
+| `test_ai_fallback.py` | 联网搜索未开启时降级、只降级一次、AI 全挂 |
+| `test_ai_output.py` | `mediaType=unknown` 反查、有 ID 无季集、目录标注 ID、唯一候选兜底 |
+| `test_notify.py` | 成功/失败通知、开关、通道回退、通知故障不影响整理 |
+| `doctor.py` | 清单静态检查、UI 组件属性白名单、invoke 必填字段、续接参数 |
+
+`doctor.py` 里两条检查是从真实故障里长出来的：
+
+- **UI 属性白名单**：`{"type":"host","action":...}` 应为 `name`，写错会让整个插件页打不开。
+- **续接参数**：`tasks.wait` 的 `completion.input` 必须提供续接动作的必填字段，漏传只在运行到那一步才暴露。
+
+### 文件
+
+- `plugin.py`：动作、续接、查询与页面。
+- `identify.py`：提示词构造与模型回答解析（不认识宿主 SDK，可单独测）。
+- `naming.py`：文件名解析与名称规范化（本地兜底 + TMDB 比对用）。
+- `notify.py`：结果通知文案生成。
+- `tests/`：内存假宿主测试与静态检查。
