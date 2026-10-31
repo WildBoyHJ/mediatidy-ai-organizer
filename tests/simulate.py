@@ -220,7 +220,10 @@ DETAIL = {
     (693134, "movie"): {"id": 693134, "title": "沙丘2", "originalTitle": "Dune: Part Two",
                         "year": "2024", "mediaType": "movie", "overview": ""},
     (95396, "tv"): {"id": 95396, "title": "人生切割术", "originalTitle": "Severance",
-                    "year": "2022", "mediaType": "tv", "overview": ""},
+                    "year": "2022", "mediaType": "tv", "overview": "",
+                    "seasons": [{"season_number": 0, "episode_count": 1},
+                                {"season_number": 1, "episode_count": 9},
+                                {"season_number": 2, "episode_count": 10}]},
 }
 
 

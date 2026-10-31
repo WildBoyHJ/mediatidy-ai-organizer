@@ -265,7 +265,7 @@ uv run --no-sync python -m mt_plugin pack    # 输出 dist/ai.tmdb-organizer-<�
 全部用内存假宿主，不需要真实 AI / TMDB / 网盘：
 
 ```bash
-for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_progress test_organize test_tasks test_refresh test_steps test_filter test_failed_move; do
+for t in simulate test_flow test_accuracy test_realcases test_profile test_ai_fallback test_ai_output test_notify test_notify_series test_progress test_organize test_tasks test_refresh test_steps test_filter test_failed_move test_season_rules; do
   .venv/bin/python tests/$t.py
 done
 .venv/bin/python tests/doctor.py   # 清单 + 页面属性 + 续接参数静态检查

@@ -520,6 +520,8 @@ class Plugin(BasePlugin):
 
         # 同剧一致性
         results = self._check_series(results)
+        # 同季文件数是否超过 TMDB 集数（超出必然错位，整组拦下）
+        results = self._check_season_counts(results, state.get("seasonMaps") or {})
         self._persist(ctx, flow_key, results)
 
         # 整理不出来的（未识别 / 身份冲突 / 需人工）按需移到用户指定的失败目录
@@ -665,6 +667,7 @@ class Plugin(BasePlugin):
                     record["reason"] = f"{record['reason']}；{note}" if record["reason"] else note
             if not record["title"]:
                 record["status"] = "unrecognized"
+                record["reasonCode"] = "no_title"
                 record["reason"] = "模型没有给出作品名"
             record["preview"] = shown
             records.append(record)
@@ -708,6 +711,7 @@ class Plugin(BasePlugin):
             record["reason"] = f"使用目录标注的 TMDB ID {hinted}"
         if not record["title"]:
             record["status"] = "unrecognized"
+            record["reasonCode"] = "no_title"
             record["reason"] = "文件名无法解析出作品名"
         return record
 
@@ -715,9 +719,14 @@ class Plugin(BasePlugin):
 
     def _verify_all(self, ctx: Context, results: list[dict], options: dict,
                     state: dict, deadline: float) -> tuple[list[dict], dict]:
-        """核对 AI 给出的 tmdbId。插件不替模型挑候选——那是同名误判的主要来源。"""
+        """核对 AI 给出的 tmdbId。插件不替模型挑候选——那是同名误判的主要来源。
+
+        季集校验只用 `tmdb.detail` 已经返回的 `seasons`（含 season_number 与
+        episode_count），不再单独调 tmdb.season：那个接口语义是「某季的分集」，
+        拿 season=0 当「季号列表」用会得到特别篇的集号，季号闸门形同虚设。
+        """
         details: dict[tuple[int, str], dict | None] = {}
-        seasons_cache: dict[int, list[int]] = {}
+        seasons_cache: dict[int, dict[int, int]] = {}
         tolerance = options["tolerance"]
 
         total = len(results)
@@ -726,6 +735,7 @@ class Plugin(BasePlugin):
                 continue
             if time.monotonic() > deadline:
                 record["status"] = "failed"
+                record["reasonCode"] = "timeout"
                 record["reason"] = "超出识别时间上限，未核对 TMDB"
                 continue
             ctx.mt.runtime.checkpoint()
@@ -742,6 +752,7 @@ class Plugin(BasePlugin):
             if media_type not in ("movie", "tv"):
                 # 保留模型给出的具体原因（如「避免猜测」），不要用通用文案覆盖
                 record["status"] = "unrecognized"
+                record["reasonCode"] = "media_type_unknown"
                 record["reason"] = record.get("reason") or (
                     "无法判断是电影还是剧集"
                     if tmdb_id <= 0 else "TMDB 上找不到该 ID 对应的电影或剧集"
@@ -751,7 +762,7 @@ class Plugin(BasePlugin):
             if tmdb_id <= 0:
                 # 模型没给 ID 时，用名称+年份做一次受控搜索：
                 # 只有「唯一一个候选通过名称与年份校验」才采纳，多个候选一律不猜。
-                resolved, why = self._resolve_unique(
+                resolved, why, why_code = self._resolve_unique(
                     ctx, record, details, state, tolerance)
                 if resolved:
                     tmdb_id = resolved
@@ -761,6 +772,7 @@ class Plugin(BasePlugin):
                     # 保留识别阶段的原因（如「本地文件名解析」），追加兜底搜索的结论
                     base = record.get("reason") or ""
                     record["status"] = "unrecognized"
+                    record["reasonCode"] = why_code or "no_tmdb_id"
                     record["reason"] = f"{base}；{why}" if base and why else (base or why or "模型没有给出可靠的 TMDB ID")
                     continue
 
@@ -768,6 +780,7 @@ class Plugin(BasePlugin):
             if identity not in details:
                 if state["tmdbDetails"] >= TMDB_SEARCH_LIMIT:
                     record["status"] = "failed"
+                    record["reasonCode"] = "tmdb_budget_exhausted"
                     record["reason"] = "TMDB 查询次数用尽"
                     continue
                 try:
@@ -782,12 +795,14 @@ class Plugin(BasePlugin):
             detail = details[identity]
             if not detail:
                 record["status"] = "failed"
+                record["reasonCode"] = "tmdb_lookup_failed"
                 record["reason"] = "TMDB 详情读取失败，未生成整理请求"
                 continue
 
             # 1) ID 与类型必须与返回一致
             if int(detail.get("id") or 0) != tmdb_id or detail.get("mediaType") != media_type:
                 record["status"] = "identity_conflict"
+                record["reasonCode"] = "id_type_mismatch"
                 record["reason"] = "TMDB 返回的 ID 或类型与识别结论不一致"
                 continue
 
@@ -797,6 +812,7 @@ class Plugin(BasePlugin):
                 [record.get("title", ""), record.get("originalTitle", "")],
             ):
                 record["status"] = "identity_conflict"
+                record["reasonCode"] = "title_conflict"
                 record["reason"] = (
                     f"识别为「{record.get('title') or '未知'}」，但 TMDB ID {tmdb_id} "
                     f"对应「{detail.get('title') or detail.get('originalTitle') or '未知作品'}」"
@@ -808,58 +824,73 @@ class Plugin(BasePlugin):
             year = self._year(detail.get("year", ""))
             if record["year"] and year and abs(record["year"] - year) > tolerance:
                 record["status"] = "identity_conflict"
+                record["reasonCode"] = "year_conflict"
                 record["reason"] = f"年份不一致（识别 {record['year']}，TMDB {year}）"
                 record["tmdbId"] = tmdb_id
                 continue
 
-            # 4) 季集合法性：用 TMDB 真实季列表核对，而不是只看有没有数字
+            # 4) 季集合法性：用 detail 里的真实季与集数核对，而不是只看有没有数字
             if media_type == "tv":
                 record["tmdbId"] = tmdb_id
                 if record.get("multiEpisode"):
                     record["status"] = "needs_review"
+                    record["reasonCode"] = "multi_episode"
                     record["reason"] = "多集合集，需人工拆分季集"
                     continue
+                season_map = self._season_map(detail, seasons_cache, tmdb_id)
+                real_seasons = sorted(num for num in season_map if num > 0)
                 season = int(record.get("season") or 0)
                 episode = int(record.get("episode") or 0)
-                if tmdb_id not in seasons_cache:
-                    seasons_cache[tmdb_id] = self._seasons_of(ctx, tmdb_id, state) or []
-                listed = seasons_cache[tmdb_id]
                 if not season:
-                    real = [item for item in listed if item > 0]
-                    if len(real) == 1:
-                        # 只有一季：TMDB 编号就是第 1 季，可以确定
-                        season = real[0]
+                    if len(real_seasons) == 1:
+                        # 只有一季：TMDB 编号就是那一季，可以确定
+                        season = real_seasons[0]
                         record["season"] = season
-                    elif not listed:
-                        # 拿不到季列表：按第 1 季处理并标记待复核
+                    elif not season_map:
                         season = 1
                         record["season"] = 1
                         record["status"] = "needs_review"
-                        record["reason"] = "文件名无季号且 TMDB 季列表不可用，暂按第 1 季处理，请核对"
+                        record["reasonCode"] = "season_unknown"
+                        record["reason"] = "文件名无季号且 TMDB 未返回季信息，暂按第 1 季处理，请核对"
                         if not episode:
                             continue
                     else:
                         record["status"] = "needs_review"
+                        record["reasonCode"] = "season_unknown"
                         record["reason"] = (
                             "无法确定季号，需人工指定。TMDB 已列出："
-                            + ", ".join(f"S{item:02d}" for item in listed)
+                            + ", ".join(f"S{item:02d}" for item in real_seasons)
                         )
                         continue
                 if not episode:
                     record["status"] = "needs_review"
+                    record["reasonCode"] = "episode_missing"
                     record["reason"] = f"匹配到《{record['title']}》（S{season:02d}）但无法识别集数"
                     continue
-                # 季号是否真实存在：避免「S02 但该剧只有一季」这类文件名错误。
-                # 只在拿到非空季列表时判定，空列表/查询失败一律跳过，避免把
-                # 「拿不到数据」误判成「季不存在」。
-                if tmdb_id not in seasons_cache:
-                    seasons_cache[tmdb_id] = self._seasons_of(ctx, tmdb_id, state) or []
-                listed = seasons_cache[tmdb_id]
-                if listed and season not in listed:
+                # 季号是否真实存在
+                if season_map and season not in season_map:
                     record["status"] = "needs_review"
+                    record["reasonCode"] = "season_mismatch"
                     record["reason"] = (
                         f"TMDB 未列出第 {season} 季，已列出："
-                        + ", ".join(f"S{item:02d}" for item in listed)
+                        + ", ".join(f"S{item:02d}" for item in real_seasons or sorted(season_map))
+                    )
+                    continue
+                total_episodes = int(season_map.get(season) or 0)
+                if total_episodes and episode > total_episodes:
+                    # 集号超出该季集数：提交出去必然错位
+                    record["status"] = "needs_review"
+                    record["reasonCode"] = "episode_out_of_range"
+                    record["reason"] = (
+                        f"TMDB 第 {season} 季只有 {total_episodes} 集，"
+                        f"文件名标注第 {episode} 集"
+                    )
+                    continue
+                if season in season_map and not total_episodes:
+                    record["status"] = "needs_review"
+                    record["reasonCode"] = "episode_unverifiable"
+                    record["reason"] = (
+                        f"TMDB 第 {season} 季暂无分集数据，无法校验第 {episode} 集"
                     )
                     continue
             else:
@@ -872,12 +903,15 @@ class Plugin(BasePlugin):
             record["year"] = year or record["year"]
             record["status"] = "matched"
             record["reason"] = ""
+            record["reasonCode"] = ""
+        # 把季→集数表带出去，供「同季文件数」检查复用，避免重复请求
+        state["seasonMaps"] = seasons_cache
         return results, state
 
     @staticmethod
     def _resolve_unique(ctx: Context, record: dict,
                         details: dict[tuple[int, str], dict | None],
-                        state: dict, tolerance: int) -> tuple[int, str]:
+                        state: dict, tolerance: int) -> tuple[int, str, str]:
         """模型未给 ID 时，按名称+年份搜索；只有唯一候选通过校验才采纳。
 
         返回 (tmdbId, 说明)。多个候选或没有候选时返回 (0, 原因)。
@@ -886,9 +920,9 @@ class Plugin(BasePlugin):
         title = record.get("title") or ""
         original = record.get("originalTitle") or ""
         if media_type not in ("movie", "tv") or not (title or original):
-            return 0, ""
+            return 0, "", "no_tmdb_id"
         if state.get("tmdbSearches", 0) >= TMDB_SEARCH_LIMIT:
-            return 0, ""
+            return 0, "", "tmdb_budget_exhausted"
 
         candidates: list[dict] = []
         seen: set[int] = set()
@@ -914,7 +948,7 @@ class Plugin(BasePlugin):
                 candidates.append(item)
 
         if not candidates:
-            return 0, "模型未给出 TMDB ID，按名称搜索也没有结果"
+            return 0, "模型未给出 TMDB ID，按名称搜索也没有结果", "no_candidates"
 
         # 只有同时满足「名称命中」和「年份容差」的候选才算数
         wanted = [title, original]
@@ -930,14 +964,14 @@ class Plugin(BasePlugin):
             valid.append(item)
 
         if len(valid) == 1:
-            return int(valid[0]["id"]), ""
+            return int(valid[0]["id"]), "", ""
         if len(valid) > 1:
             listed = "、".join(
                 f"{item.get('title') or item.get('originalTitle')}（{item.get('year') or '?'}，ID {item.get('id')}）"
                 for item in valid[:4]
             )
-            return 0, f"同名候选无法裁决，需人工确认：{listed}"
-        return 0, "模型未给出 TMDB ID，按名称搜索到的候选都与名称或年份不符"
+            return 0, f"同名候选无法裁决，需人工确认：{listed}", "ambiguous_candidates"
+        return 0, "模型未给出 TMDB ID，按名称搜索到的候选都与名称或年份不符", "candidates_mismatch"
 
     @staticmethod
     def _resolve_media_type(ctx: Context, tmdb_id: int,
@@ -961,25 +995,24 @@ class Plugin(BasePlugin):
         return ""
 
     @staticmethod
-    def _seasons_of(ctx: Context, tmdb_id: int, state: dict) -> list[int] | None:
-        """拉取该剧在 TMDB 已列出的季号。
+    def _season_map(detail: dict, cache: dict[int, dict[int, int]],
+                    tmdb_id: int) -> dict[int, int]:
+        """从 detail.seasons 建「季号 → 集数」表。
 
-        返回 None 表示查询不可用（失败或额度用尽）——此时跳过季号校验，不误拦。
-        返回空列表表示 TMDB 确实没有列出任何季。
+        数据在 tmdb.detail 里就有，不需要额外调用 tmdb.season。
+        返回空字典表示 TMDB 没给季信息（此时跳过季集校验，不误拦）。
         """
-        if state.get("seasonQueries", 0) >= 60:
-            return None
-        state["seasonQueries"] = state.get("seasonQueries", 0) + 1
-        try:
-            listed = ctx.mt.tmdb.season(id=tmdb_id, season=0)
-        except SDKError as error:
-            if error.code == "CANCELLED":
-                raise
-            ctx.mt.log(level="debug", message=f"季列表查询失败 {error.code}，跳过季号校验")
-            return None
-        if not isinstance(listed, list):
-            return None
-        return sorted({int(item) for item in listed if isinstance(item, int) and item >= 0})
+        if tmdb_id in cache:
+            return cache[tmdb_id]
+        mapping: dict[int, int] = {}
+        for item in detail.get("seasons") or []:
+            if not isinstance(item, dict):
+                continue
+            number = item.get("season_number")
+            if isinstance(number, int):
+                mapping[number] = int(item.get("episode_count") or 0)
+        cache[tmdb_id] = mapping
+        return mapping
 
     @staticmethod
     def _year(value) -> int:
@@ -1008,11 +1041,45 @@ class Plugin(BasePlugin):
             if len(ids) > 1:
                 for member in members:
                     member["status"] = "identity_conflict"
+                    member["reasonCode"] = "series_inconsistent"
                     member["reason"] = "同剧跨批识别出不同 TMDB 作品，整组暂停"
             elif len(seasons) > 1:
                 for member in members:
                     member["status"] = "identity_conflict"
+                    member["reasonCode"] = "series_inconsistent"
                     member["reason"] = "同剧识别出不同季号，整组暂停"
+        return results
+
+    # ---------------------------------------------------------------- 同季数量
+
+    @staticmethod
+    def _check_season_counts(results: list[dict],
+                             season_maps: dict[int, dict[int, int]]) -> list[dict]:
+        """同一季的文件数超过 TMDB 集数 → 必然错位，整组拦下。
+
+        少于 TMDB 集数不拦：用户可能只处理了其中几集，这是正常用法。
+        只在拿到该季集数（>0）时判定，拿不到数据一律跳过，避免误拦。
+        """
+        groups: dict[tuple[int, int], list[dict]] = {}
+        for record in results:
+            if record.get("status") != "matched" or record.get("mediaType") != "tv":
+                continue
+            tmdb_id = int(record.get("tmdbId") or 0)
+            season = int(record.get("season") or 0)
+            if tmdb_id <= 0:
+                continue
+            groups.setdefault((tmdb_id, season), []).append(record)
+        for (tmdb_id, season), members in groups.items():
+            total = int((season_maps.get(tmdb_id) or {}).get(season) or 0)
+            if not total or len(members) <= total:
+                continue
+            for record in members:
+                record["status"] = "needs_review"
+                record["reasonCode"] = "season_count_mismatch"
+                record["reason"] = (
+                    f"本季 {len(members)} 个文件，TMDB 第 {season} 季只有 {total} 集，"
+                    "多出的文件会错位，整组暂停"
+                )
         return results
 
     # ---------------------------------------------------------------- 提交
@@ -1051,6 +1118,7 @@ class Plugin(BasePlugin):
                 ctx.mt.log(level="error", message=f"草稿准备失败 {error.code}")
                 for record in chunk:
                     record["status"] = "failed"
+                    record["reasonCode"] = "submit_failed"
                     record["reason"] = f"草稿准备失败：{error.code}"
                 continue
             prepared = {entry.get("fileRef"): entry for entry in response.get("items", [])
@@ -1091,6 +1159,7 @@ class Plugin(BasePlugin):
                 task = ctx.mt.organize.manual.run(payload)
             except SDKError as error:
                 record["status"] = "failed"
+                record["reasonCode"] = "submit_failed"
                 record["reason"] = f"提交失败：{error.code}"
                 continue
             record["status"] = "submitted"
@@ -1198,6 +1267,7 @@ class Plugin(BasePlugin):
                     "tmdb": str(record.get("tmdbId") or ""),
                     "episodeLabel": self._episode_label(record),
                     "statusLabel": self._status_label(record.get("status", "")),
+                    "reasonCode": record.get("reasonCode", ""),
                     "reason": self._reason_with_move(record),
                     "aiRaw": (record.get("preview") or {}).get("text", "")[:600],
                 })
@@ -1927,6 +1997,7 @@ class Plugin(BasePlugin):
             "version": item.get("version", ""),
             "status": status,
             "reason": reason,
+            "reasonCode": "",
             "title": "",
             "originalTitle": "",
             "year": 0,

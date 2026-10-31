@@ -22,9 +22,13 @@ def file(ref, name, path):
 
 
 def run(files, reply, details, seasons=None):
+    # 季信息现在来自 tmdb.detail 的 seasons 字段（不再单独调 tmdb.season）
+    for tid, numbers in (seasons or {}).items():
+        for key, value in details.items():
+            if key[0] == tid and isinstance(value, dict):
+                value["seasons"] = [{"season_number": n, "episode_count": 100}
+                                    for n in numbers]
     host = FakeHost(files, reply, {}, details)
-    host.seasons = seasons or {}
-    host.m_tmdb_season = lambda v: host.seasons.get(v["id"], [])
     plugin, handlers = load_plugin(ROOT, MANIFEST)
     ctx = ctx_for(host, files)
     handlers[("action", "start")]({"profileId": 7, "mode": "draft"}, ctx)
