@@ -158,10 +158,49 @@ def test_page_has_steps_table():
     print("  页面表格与刷新按钮就位")
 
 
+def test_steps_bar_fields():
+    """步骤条要拿到 6 个标签和当前游标，且游标指向进行中的那一步。"""
+    host, plugin, handlers, ctx = run()
+    host.kv["runs/flow-1/summary"]["value"]["status"] = "running"
+    host.kv["runs/flow-1/progress"]["value"].update(
+        {"stage": "核对 TMDB", "completed": 2, "total": 3, "at": now_stamp()})
+    data = ask(handlers, "progress", ctx)
+    assert data["stepLabels"] == ["目录扫描", "AI 识别", "TMDB 核对",
+                                  "提交整理", "MT 整理", "归档结果"], data["stepLabels"]
+    assert data["stepIndex"] == 2, data["stepIndex"]
+    print("  步骤条:", data["stepLabels"], "→", data["stepIndex"])
+
+
+def test_steps_bar_index_when_done():
+    """全部结束后游标要走到末尾，不能退回 0。"""
+    host, plugin, handlers, ctx = run()
+    host.kv["runs/flow-1/summary"]["value"]["status"] = "done"
+    host.task_status.update({f"task-{i}": "done" for i in (1, 2, 3)})
+    data = ask(handlers, "progress", ctx)
+    assert data["stepIndex"] == 5, data["stepIndex"]  # 夹在最后一个标签上
+    print("  完成后游标:", data["stepIndex"])
+
+
+def test_page_has_steps_bar():
+    host, plugin, handlers, ctx = run()
+    token = current.set(ctx)
+    try:
+        page = plugin.get_page(ctx)
+    finally:
+        current.reset(token)
+    blob = json.dumps(page, ensure_ascii=False)
+    assert '"Steps"' in blob, "流程卡要有步骤条"
+    assert "query.progress.data.stepLabels" in blob
+    assert "query.progress.data.stepIndex" in blob
+    print("  步骤条已绑定")
+
+
 if __name__ == "__main__":
     for function in (test_scan_step_reads_mt_task, test_scan_step_skipped_when_files,
                      test_identify_step_position, test_verify_and_submit_steps,
                      test_organize_step_running, test_done_all_steps,
-                     test_cancelled_step, test_page_has_steps_table):
+                     test_cancelled_step, test_page_has_steps_table,
+                     test_steps_bar_fields, test_steps_bar_index_when_done,
+                     test_page_has_steps_bar):
         function()
     print("\n六步总览用例全部通过")

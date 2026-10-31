@@ -135,6 +135,10 @@ class Plugin(BasePlugin):
                 title="开始",
             ),
             ui.Card(
+                ui.Steps(
+                    labels=ui.ref("query.progress.data.stepLabels"),
+                    value=ui.ref("query.progress.data.stepIndex"),
+                ),
                 ui.Progress(
                     label=ui.ref("query.progress.data.message"),
                     value=ui.ref("query.progress.data.completed"),
@@ -163,7 +167,8 @@ class Plugin(BasePlugin):
                     text=ui.expr(
                         "if",
                         running,
-                        "扫描与 MT 整理两行的进度是现查任务状态得到的，点「刷新进度」更新。",
+                        "扫描与 MT 整理两行的进度是现查任务状态得到的；宿主只在整轮结束后自动刷新，"
+                        "运行中点「刷新进度」更新。",
                         ui.ref("query.results.data.message"),
                     ),
                     tone="muted",
@@ -1478,7 +1483,8 @@ class Plugin(BasePlugin):
         flow_key = self._current_flow(ctx)
         if not flow_key:
             return {"completed": 0, "total": 0, "message": "", "stage": "",
-                    "status": "", "active": False, "steps": empty_steps}
+                    "status": "", "active": False, "steps": empty_steps,
+                    "stepLabels": [], "stepIndex": 0}
         flow = self._load_flow(ctx, flow_key) or {}
         entry = ctx.mt.storage.get(key=f"runs/{flow_key}/progress")
         data = entry["value"] if entry["found"] else {}
@@ -1496,35 +1502,42 @@ class Plugin(BasePlugin):
             and _age_minutes(str(data.get("at") or "")) > STALE_MINUTES
         steps = self._build_steps(ctx, flow, summary, status, stage,
                                   done_count, total_in_step, total_files)
+        labels = [row["label"] for row in steps]
+        cursor = next((i for i, row in enumerate(steps) if row["state"] == "进行中"), None)
+        if cursor is None:
+            # 没有进行中的步骤时，用「已完成（含跳过）」的个数当游标，进度条才不会倒退
+            cursor = sum(1 for row in steps if row["state"] in ("已完成", "跳过"))
+        cursor = max(0, min(cursor, len(steps) - 1))
+
+        def out(**kw: Any) -> dict:
+            return {"steps": steps, "stepLabels": labels, "stepIndex": cursor, **kw}
 
         if stale:
             for row in steps:
                 if row["state"] == "进行中":
                     row["state"] = "已中断"
                     break
-            return {"completed": identify_total, "total": identify_total,
-                    "message": "上一轮已中断 · 可以直接重新开始",
-                    "stage": "stale", "status": "stale", "active": False,
-                    "steps": steps, "current": ""}
+            return out(completed=identify_total, total=identify_total,
+                       message="上一轮已中断 · 可以直接重新开始",
+                       stage="stale", status="stale", active=False, current="")
 
         current = next((row for row in steps if row["state"] == "进行中"), None)
         if status in ("waiting", "submitting"):
             rows = self._task_rows(ctx, flow_key)
             if rows and not any(row["active"] for row in rows):
-                return {"completed": identify_total, "total": identify_total,
-                        "message": "整理已结束 · 结果见下方识别结果",
-                        "stage": "done", "status": "done", "active": False,
-                        "steps": steps, "current": ""}
-            return {"completed": identify_total, "total": identify_total,
-                    "message": "识别完成 · 整理由 MT 执行，进度见下方「整理进度」",
-                    "stage": "organize", "status": status, "active": True,
-                    "steps": steps, "current": current["label"] if current else ""}
+                return out(completed=identify_total, total=identify_total,
+                           message="整理已结束 · 结果见下方识别结果",
+                           stage="done", status="done", active=False, current="")
+            return out(completed=identify_total, total=identify_total,
+                       message="识别完成 · 整理由 MT 执行，进度见下方「整理任务」",
+                       stage="organize", status=status, active=True,
+                       current=current["label"] if current else "")
         if status in ("done", "cancelled"):
             message = ("整理任务已全部取消 · 结果见下方识别结果" if status == "cancelled"
                        else "本轮已结束 · 结果见下方识别结果")
-            return {"completed": identify_total, "total": identify_total,
-                    "message": message, "stage": "done", "status": status,
-                    "active": False, "steps": steps, "current": ""}
+            return out(completed=identify_total, total=identify_total,
+                       message=message, stage="done", status=status,
+                       active=False, current="")
 
         if current is None:
             completed, total = identify_total, identify_total
@@ -1533,9 +1546,9 @@ class Plugin(BasePlugin):
             completed = int(current.get("completed") or 0)
             total = int(current.get("total") or 0)
             message = f"{current['label']} · {current['detail']}"
-        return {"completed": completed, "total": total, "message": message,
-                "stage": stage, "status": status, "active": current is not None,
-                "steps": steps, "current": current["label"] if current else ""}
+        return out(completed=completed, total=total, message=message,
+                   stage=stage, status=status, active=current is not None,
+                   current=current["label"] if current else "")
 
     @staticmethod
     def _task_status_label(status: str) -> str:

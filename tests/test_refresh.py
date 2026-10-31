@@ -112,7 +112,7 @@ def test_progress_full_bar_when_organizing():
     data = ask(handlers, "progress", ctx)
     assert data["status"] in ("waiting", "submitting"), data
     assert data["completed"] == data["total"] == 3, data
-    assert "识别完成" in data["message"] and "整理进度" in data["message"], data["message"]
+    assert "识别完成" in data["message"] and "整理任务" in data["message"], data["message"]
     assert data["active"] is True, data
     print("  整理阶段:", data["message"])
 
